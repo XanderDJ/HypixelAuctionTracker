@@ -76,7 +76,7 @@ data Bid =
         ts :: Int64
     } deriving Show
 
-
+-- Test for github
 
 -- Typeclasses --
 
