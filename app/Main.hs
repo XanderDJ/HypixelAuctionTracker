@@ -11,6 +11,7 @@ import           Data.Aeson              hiding ( Value )
 import           Data.List               hiding ( delete )
 import           Data.Int
 import           Data.Maybe
+import           Data.Text                      ( Text )
 import qualified Data.Text                     as T
 import           Text.Regex.TDFA
 import           Database.MongoDB        hiding ( find
@@ -33,7 +34,9 @@ main = do
         . convertToAuctionGroup
         . getGroupedAuctions
         $ updateAuctionPage ap
-              
+
+
+
 
 -- DATA TYPES FOR JSON --
 
@@ -47,17 +50,17 @@ data AuctionPage =
 
 data Auction =
     Auction {
-        uuid :: T.Text,   -- Part of index for the updates
+        uuid :: Text,   -- Part of index for the updates
         startAuction :: Int64, -- Part of index for the updates
         estimatedEnd :: Int64,
-        itemName :: T.Text,
-        itemLore :: T.Text,
-        reforge :: T.Text,
-        enchants :: [T.Text],
+        itemName :: Text,
+        itemLore :: Text,
+        reforge :: Text,
+        enchants :: [Text],
         hpb ::Int,
-        extra :: T.Text,
-        category :: T.Text,
-        tier :: T.Text,
+        extra :: Text,
+        category :: Text,
+        tier :: Text,
         startingBid :: Int,
         claimed :: Bool,
         highestBidAmount :: Int,
@@ -65,18 +68,18 @@ data Auction =
     } deriving Show
 
 data AuctionGroup = AuctionGroup {
-    gItemName :: T.Text,
+    gItemName :: Text,
     gAuctions :: [Auction]
 } deriving Show
 
 data Bid =
     Bid {
-        auctionId :: T.Text,
+        auctionId :: Text,
         amount :: Int,
         ts :: Int64
     } deriving Show
 
--- Test for github
+
 
 -- Typeclasses --
 
@@ -207,7 +210,7 @@ quicksort (p : xs) = (quicksort lesser) ++ [p] ++ (quicksort greater)
     lesser  = filter (< p) xs
     greater = filter (>= p) xs
 
-getItemNames :: Maybe AuctionPage -> [T.Text]
+getItemNames :: Maybe AuctionPage -> [Text]
 getItemNames (Just ap) = [ itemName auction | auction <- (auctions ap) ]
 getItemNames _         = ["Empty"]
 
@@ -278,13 +281,13 @@ matchHpb lore = head subMatch
     stub     = getSubMatch match
     subMatch = if length stub /= 0 then stub else ["0"]
 
-dropN :: Int -> T.Text -> T.Text
+dropN :: Int -> Text -> Text
 dropN n ""   = T.empty
 dropN 0 text = text
 dropN n text = dropN (n - 1) $ T.tail text
 
 
-allReforges :: [T.Text]
+allReforges :: [Text]
 allReforges =
     [ "Bizarre"
     , "Clean"
@@ -405,11 +408,11 @@ enchantsMaxLevel =
     , ("Luck of the Sea"      , 6)
     ]
 
-enchantVariants :: (String, Int) -> [T.Text]
+enchantVariants :: (String, Int) -> [Text]
 enchantVariants (str, maxLevel) =
     [ T.pack $ str ++ " " ++ intToRoman lvl | lvl <- [1 .. maxLevel] ]
 
-allEnchants :: [T.Text]
+allEnchants :: [Text]
 allEnchants = concatMap enchantVariants enchantsMaxLevel
 
 
