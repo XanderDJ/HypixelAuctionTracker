@@ -14,29 +14,35 @@ import           Data.Maybe
 import           Data.Text                      ( Text )
 import qualified Data.Text                     as T
 import           Text.Regex.TDFA
+import           Hledger.Utils
 import           Database.MongoDB        hiding ( find
                                                 , group
                                                 , sort
+                                                , insert
                                                 )
 import qualified Database.MongoDB              as DB
                                                 ( find
                                                 , group
                                                 , sort
+                                                , insert
+                                                , Value(String)
                                                 )
 import           Control.Monad.Trans            ( liftIO )
 
 main :: IO ()
-main = do
-    ap <- getAuctionPage 0
-    print
-        $ toBSON
-        . head
-        . convertToAuctionGroup
-        . getGroupedAuctions
-        $ updateAuctionPage ap
+main = putStr "Yo"
 
+-- Stores the item, category and tier of the AuctionGroup provided. Should only be called if the item group is not in the items collection yet
+storeAuctionGroup :: AuctionGroup -> Action IO Value
+storeAuctionGroup = DB.insert "items" . toBSON
 
+txtInDL :: Text -> Label -> [Document] -> Bool
+txtInDL txt label docs = elem (DB.String txt) (map (valueAt label) docs)
 
+getAllItems :: Action IO [Document]
+getAllItems = rest =<< DB.find (select [] "items")
+    { project = ["itemGroup" =: 1, "_id" =: 0]
+    }
 
 -- DATA TYPES FOR JSON --
 
@@ -231,17 +237,33 @@ updateAuctionPage :: Maybe AuctionPage -> Maybe AuctionPage
 updateAuctionPage (Just ap) = Just $ ap { auctions = newAuctions }
     where newAuctions = map (addReforge . addEnchants . addHpb) $ auctions ap
 
+
+-- There are reforges that have the same name as certain items prefixes (wise dragon,strong dragon, superior dragon) These need not be extracted
 addReforge :: Auction -> Auction
 addReforge ah = ah { reforge = reforgeName, itemName = newItemName }
   where
     oldItemName = itemName ah
-    tempReforgeName =
-        T.pack (((T.unpack oldItemName) :: String) =~ ("[A-Za-z]+" :: String))
+    match       = T.pack $ (T.unpack oldItemName) =~ ("[A-Za-z]+" :: String)
     reforgeName =
-        if elem tempReforgeName allReforges then tempReforgeName else reforge ah
+        if isValidReforge match oldItemName then match else reforge ah
     newItemName = if reforgeName /= reforge ah
         then dropN ((T.length reforgeName) + 1) oldItemName
         else oldItemName
+
+
+isValidReforge :: Text -> Text -> Bool
+isValidReforge reforge item =
+    elem reforge allReforges
+        && (  (notElem reforge annoyingReforges)
+           || (not $ any
+                  (uncurry T.isPrefixOf)
+                  [ (annItem, item) | annItem <- itemsWithRefPref ]
+              )
+           )
+
+itemsWithRefPref = ["Wise Dragon", "Superior Dragon", "Strong Dragon"]
+
+annoyingReforges = ["Wise", "Superior", "Strong"]
 
 addEnchants :: Auction -> Auction
 addEnchants ah = ah { enchants = newEnchants }
@@ -330,6 +352,7 @@ allReforges =
     , "Unpleasant"
     , "Unreal"
     , "Vivid"
+    , "Very"
     , "Wise"
     , "Zealous"
     ]

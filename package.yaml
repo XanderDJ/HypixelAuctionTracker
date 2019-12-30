@@ -30,6 +30,7 @@ dependencies:
 - text
 - regex-tdfa
 - mtl
+- hledger-lib
 
 library:
   source-dirs: src
