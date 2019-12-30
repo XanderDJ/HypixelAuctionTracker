@@ -28,21 +28,56 @@ import qualified Database.MongoDB              as DB
                                                 , Value(String)
                                                 )
 import           Control.Monad.Trans            ( liftIO )
+import           Control.Monad                  ( when )
 
 main :: IO ()
-main = putStr "Yo"
+main = do
+    pipe <- connect $ host "127.0.0.1"
+    ap <- getAuctionPage 0
+    let storePages = sequence' [handlePage x | x <- [0..(totalPages $ fromJust ap)]]
+    storePages
+    putStr "Done"
+
+handlePage :: Int -> IO [WriteResult]
+handlePage page = do
+    pipe <- connect $ host "127.0.0.1"
+    ap   <- getAuctionPage page
+    let ags =
+            convertToAuctionGroup . getGroupedAuctions . updateAuctionPage $ ap
+    let runDb = access pipe master "HypixelAH"
+    allItems <- runDb getAllItems
+    let storeNewAgs = sequence' $
+            (map (runDb . storeAuctionGroupMeta))
+                . (filter (\x -> not $ txtInDL "itemGroup" allItems $ gItemName x))
+                $ ags
+    storeNewAgs
+    let storeAgAuctions = sequence' $ map (runDb . storeAuctionGroup) ags
+    storeAgAuctions
+
 
 -- Stores the item, category and tier of the AuctionGroup provided. Should only be called if the item group is not in the items collection yet
-storeAuctionGroup :: AuctionGroup -> Action IO Value
-storeAuctionGroup = DB.insert "items" . toBSON
+storeAuctionGroupMeta :: AuctionGroup -> Action IO Value
+storeAuctionGroupMeta = DB.insert "items" . toBSON
 
-txtInDL :: Text -> Label -> [Document] -> Bool
-txtInDL txt label docs = elem (DB.String txt) (map (valueAt label) docs)
+ahToUp :: Auction -> (Selector, Document, [UpdateOption])
+ahToUp ah =
+    ( ["uuid" =: uuid ah, "start" =: (MongoStamp . startAuction) ah]
+    , toBSON ah
+    , [Upsert]
+    )
+
+storeAuctionGroup :: AuctionGroup -> Action IO WriteResult
+storeAuctionGroup ag = updateAll (gItemName ag) (map ahToUp (gAuctions ag))
+
+txtInDL :: Label -> [Document] -> Text -> Bool
+txtInDL label docs txt =
+    elem (DB.String txt) (map (valueAt label) docs)
 
 getAllItems :: Action IO [Document]
 getAllItems = rest =<< DB.find (select [] "items")
     { project = ["itemGroup" =: 1, "_id" =: 0]
     }
+
 
 -- DATA TYPES FOR JSON --
 
@@ -216,9 +251,8 @@ quicksort (p : xs) = (quicksort lesser) ++ [p] ++ (quicksort greater)
     lesser  = filter (< p) xs
     greater = filter (>= p) xs
 
-getItemNames :: Maybe AuctionPage -> [Text]
-getItemNames (Just ap) = [ itemName auction | auction <- (auctions ap) ]
-getItemNames _         = ["Empty"]
+getItemNames :: [AuctionGroup] -> [Text]
+getItemNames ags = [ gItemName ag | ag <- ags ]
 
 getGroupedAuctions :: Maybe AuctionPage -> [[Auction]]
 getGroupedAuctions (Just ap) = group . quicksort $ auctions ap
@@ -236,6 +270,7 @@ convertToAuctionGroup groupedAuctions =
 updateAuctionPage :: Maybe AuctionPage -> Maybe AuctionPage
 updateAuctionPage (Just ap) = Just $ ap { auctions = newAuctions }
     where newAuctions = map (addReforge . addEnchants . addHpb) $ auctions ap
+updateAuctionPage _ = Nothing 
 
 
 -- There are reforges that have the same name as certain items prefixes (wise dragon,strong dragon, superior dragon) These need not be extracted
@@ -288,9 +323,6 @@ getHpbAmount ah | cat == "armor"  = amount / 4.0
     lore   = T.unpack $ itemLore ah
     amount = read $ matchHpb lore
 
-getSubMatch :: (String, String, String, [String]) -> [String]
-getSubMatch (_, _, _, el) = el
-
 matchHpb :: String -> String
 matchHpb lore = head subMatch
   where
@@ -300,7 +332,7 @@ matchHpb lore = head subMatch
             , String
             , [String]
             )
-    stub     = getSubMatch match
+    stub     = fourth4 match
     subMatch = if length stub /= 0 then stub else ["0"]
 
 dropN :: Int -> Text -> Text
