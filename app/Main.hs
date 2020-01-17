@@ -375,12 +375,12 @@ getAmount = getNBTAttr "Count"
 -- There are a couple of weird things. Some items can have a reforge that has the same name as the prefix of the item. I.e. superior and superior dragon boots. This will then be transformed into very
 -- But in the NBT info it will still say the superior as the reforge and not very. Same goes for strong and wise. This causes names to be shortened in the wrong way
 addReforge :: Auction -> Auction
-addReforge ah = ah { reforge = reforgeName, itemName = newItemName }
+addReforge ah = ah { reforge = mod', itemName = newItemName }
   where
     modifier = getReforge $ nbt ah
     reforgeName = maybe (reforge ah) getStringTag modifier
-    mod' = if reforgeName `elem` weirdMods then "None" else  reforgeName
-    newItemName = if isNothing modifier || reforgeName `elem` weirdMods then itemName ah else getItemNameWithoutMod $ itemName ah
+    mod' = if reforgeName `elem` weirdMods then fst $ T.span (\x -> x `notElem` "_") reforgeName else reforgeName
+    newItemName = if isNothing modifier then itemName ah else getItemNameWithoutMod $ itemName ah
 
 getItemNameWithoutMod :: Text -> Text
 getItemNameWithoutMod txt = itemName
