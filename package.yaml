@@ -28,9 +28,13 @@ dependencies:
 - aeson
 - bytestring
 - text
-- regex-tdfa
 - mtl
-- hledger-lib
+- hledger-lib 
+- nbt
+- cereal
+- zlib
+- base64-bytestring
+- array
 
 library:
   source-dirs: src

@@ -6,19 +6,25 @@ import           Lib
 import           Network.HTTP.Client     hiding ( host )
 import           Network.HTTP.Client.TLS
 import           Network.HTTP.Types.Status      ( statusCode )
+import           Data.ByteString                ( ByteString )
 import qualified Data.ByteString.Lazy          as B
-import           Data.Aeson              hiding ( Value )
+import           Data.Aeson              hiding ( Value
+                                                , Array
+                                                )
 import           Data.List               hiding ( delete )
+import           Data.Array
 import           Data.Int
 import           Data.Maybe
+import           Data.Either                    ( fromRight )
 import           Data.Text                      ( Text )
 import qualified Data.Text                     as T
-import           Text.Regex.TDFA
+import           Data.Text.Lazy.Encoding        ( encodeUtf8 )
 import           Hledger.Utils
 import           Database.MongoDB        hiding ( find
                                                 , group
                                                 , sort
                                                 , insert
+                                                , Array
                                                 )
 import qualified Database.MongoDB              as DB
                                                 ( find
@@ -27,56 +33,29 @@ import qualified Database.MongoDB              as DB
                                                 , insert
                                                 , Value(String)
                                                 )
-import           Control.Monad.Trans            ( liftIO )
-import           Control.Monad                  ( when )
+import qualified Data.NBT                      as N
+import qualified Data.Serialize                as S
+                                                ( decodeLazy )
+import qualified Codec.Compression.GZip        as GZ
+import qualified Data.ByteString.Base64.Lazy   as B64
+                                                ( decode )
+
 
 main :: IO ()
 main = do
-    pipe <- connect $ host "127.0.0.1"
     ap <- getAuctionPage 0
-    let storePages = sequence' [handlePage x | x <- [0..(totalPages $ fromJust ap)]]
-    storePages
-    putStr "Done"
+    let nbt' = (map nbt . take 30 . auctions . fromJust) ap
+    sequence' $ map print nbt'
+    return ()
 
-handlePage :: Int -> IO [WriteResult]
-handlePage page = do
+main' :: IO ()
+main' = do
     pipe <- connect $ host "127.0.0.1"
-    ap   <- getAuctionPage page
-    let ags =
-            convertToAuctionGroup . getGroupedAuctions . updateAuctionPage $ ap
-    let runDb = access pipe master "HypixelAH"
-    allItems <- runDb getAllItems
-    let storeNewAgs = sequence' $
-            (map (runDb . storeAuctionGroupMeta))
-                . (filter (\x -> not $ txtInDL "itemGroup" allItems $ gItemName x))
-                $ ags
-    storeNewAgs
-    let storeAgAuctions = sequence' $ map (runDb . storeAuctionGroup) ags
-    storeAgAuctions
-
-
--- Stores the item, category and tier of the AuctionGroup provided. Should only be called if the item group is not in the items collection yet
-storeAuctionGroupMeta :: AuctionGroup -> Action IO Value
-storeAuctionGroupMeta = DB.insert "items" . toBSON
-
-ahToUp :: Auction -> (Selector, Document, [UpdateOption])
-ahToUp ah =
-    ( ["uuid" =: uuid ah, "start" =: (MongoStamp . startAuction) ah]
-    , toBSON ah
-    , [Upsert]
-    )
-
-storeAuctionGroup :: AuctionGroup -> Action IO WriteResult
-storeAuctionGroup ag = updateAll (gItemName ag) (map ahToUp (gAuctions ag))
-
-txtInDL :: Label -> [Document] -> Text -> Bool
-txtInDL label docs txt =
-    elem (DB.String txt) (map (valueAt label) docs)
-
-getAllItems :: Action IO [Document]
-getAllItems = rest =<< DB.find (select [] "items")
-    { project = ["itemGroup" =: 1, "_id" =: 0]
-    }
+    ap   <- getAuctionPage 0
+    let storePages =
+            sequence' [ handlePage x | x <- [0 .. (totalPages $ fromJust ap)] ]
+    storePages
+    putStr "Done\n"
 
 
 -- DATA TYPES FOR JSON --
@@ -99,9 +78,11 @@ data Auction =
         reforge :: Text,
         enchants :: [Text],
         hpb ::Int,
+        aAmount :: Int,
         extra :: Text,
         category :: Text,
         tier :: Text,
+        nbt :: N.NBT,
         startingBid :: Int,
         claimed :: Bool,
         highestBidAmount :: Int,
@@ -155,26 +136,30 @@ instance FromJSON Auction where
         extra            <- jsn .: "extra"
         category         <- jsn .: "category"
         tier             <- jsn .: "tier"
+        bytestring       <- jsn .: "item_bytes"
         startingBid      <- jsn .: "starting_bid"
         claimed          <- jsn .: "claimed"
         highestBidAmount <- jsn .: "highest_bid_amount"
         bids             <- jsn .: "bids"
         bidsList         <- mapM parseJSON bids
-        return $ Auction uuid
-                         (fromIntegral startAuction)
-                         (fromIntegral estimatedEnd)
-                         itemName
-                         itemLore
-                         "None"
-                         ["None"]
-                         0
-                         extra
-                         category
-                         tier
-                         startingBid
-                         claimed
-                         highestBidAmount
-                         bidsList
+        return $ Auction
+            uuid
+            (fromIntegral startAuction)
+            (fromIntegral estimatedEnd)
+            itemName
+            itemLore
+            "None"
+            ["None"]
+            0
+            1
+            extra
+            category
+            tier
+            ((bsToNBT . fromRight "" . B64.decode . encodeUtf8) bytestring)
+            startingBid
+            claimed
+            highestBidAmount
+            bidsList
 
 
 instance FromJSON Bid where
@@ -216,6 +201,47 @@ instance ToBSON Bid where
 
 -- Functions
 
+-- IO (Database and API requests)
+
+
+getCollections :: Pipe -> IO [Collection]
+getCollections pipe = access pipe master "HypixelAH" allCollections
+
+handlePage :: Int -> IO [WriteResult]
+handlePage page = do
+    pipe <- connect $ host "127.0.0.1"
+    ap   <- getAuctionPage page
+    let ags =
+            convertToAuctionGroup . getGroupedAuctions . updateAuctionPage $ ap
+    let runDb = access pipe master "HypixelAH"
+    allItems <- runDb getAllItems
+    let storeNewAgs =
+            sequence'
+                $ (map (runDb . storeAuctionGroupMeta))
+                . (filter
+                      (\x -> not $ txtInDL "itemGroup" allItems $ gItemName x)
+                  )
+                $ ags
+    storeNewAgs
+    let storeAgAuctions = sequence' $ map (runDb . storeAuctionGroup) ags
+    storeAgAuctions
+
+
+-- Stores the item, category and tier of the AuctionGroup provided. Should only be called if the item group is not in the items collection yet
+storeAuctionGroupMeta :: AuctionGroup -> Action IO Value
+storeAuctionGroupMeta = DB.insert "items" . toBSON
+
+
+storeAuctionGroup :: AuctionGroup -> Action IO WriteResult
+storeAuctionGroup ag = updateAll (gItemName ag) (map ahToUp (gAuctions ag))
+
+
+
+getAllItems :: Action IO [Document]
+getAllItems = rest =<< DB.find (select [] "items")
+    { project = ["itemGroup" =: 1, "_id" =: 0]
+    }
+
 
 -- | get api key to use for api.hypixel.net from file in ./apikey/HypixelApiKey.txt
 getHypixelApiKey :: IO String
@@ -244,15 +270,87 @@ getKeyUsages = do
     httpLbs request manager
 
 
+-- PURE
+
+-- NBT RELATED STUFF
+bsToNBT :: B.ByteString -> N.NBT
+bsToNBT bs = nbt
+  where
+    eitherNBT = (S.decodeLazy . GZ.decompress) bs :: Either String N.NBT
+    getNBTFromEither (Left  s  ) = N.NBT "Invalid" (N.StringTag "Invalid")
+    getNBTFromEither (Right nbt) = nbt
+    nbt = getNBTFromEither eitherNBT
+
+getNBTAttr :: Text -> N.NBT -> Maybe N.NbtContents
+getNBTAttr attr (N.NBT name (N.ByteTag n)) =
+    if name == attr then Just $ N.ByteTag n else Nothing
+
+getNBTAttr attr (N.NBT name (N.ShortTag n)) =
+    if name == attr then Just $ N.ShortTag n else Nothing
+
+getNBTAttr attr (N.NBT name (N.IntTag n)) =
+    if name == attr then Just $ N.IntTag n else Nothing
+
+getNBTAttr attr (N.NBT name (N.LongTag n)) =
+    if name == attr then Just $ N.LongTag n else Nothing
+
+getNBTAttr attr (N.NBT name (N.FloatTag n)) =
+    if name == attr then Just $ N.FloatTag n else Nothing
+
+getNBTAttr attr (N.NBT name (N.DoubleTag n)) =
+    if name == attr then Just $ N.DoubleTag n else Nothing
+
+getNBTAttr attr (N.NBT name (N.ByteArrayTag arr)) =
+    if name == attr then Just $ N.ByteArrayTag arr else Nothing
+
+getNBTAttr attr (N.NBT name (N.StringTag txt)) =
+    if name == attr then Just $ N.StringTag txt else Nothing
+
+getNBTAttr attr (N.NBT name (N.IntArrayTag arr)) =
+    if name == attr then Just $ N.IntArrayTag arr else Nothing
+
+getNBTAttr attr (N.NBT name (N.LongArrayTag arr)) =
+    if name == attr then Just $ N.LongArrayTag arr else Nothing
+
+getNBTAttr attr (N.NBT name (N.ListTag arr)) = if name == attr
+    then Just $ N.ListTag arr
+    else go ems
+ where
+  ems = elems arr
+  go :: [N.NbtContents] -> Maybe N.NbtContents
+  go [] = Nothing
+  go ems = let nbcs = mapMaybe (getNBTAttr attr . N.NBT "") ems in if length nbcs == 0 then Nothing else Just $ head nbcs
+
+getNBTAttr attr (N.NBT name (N.CompoundTag list)) = if name == attr
+    then Just $ N.CompoundTag list
+    else go list
+  where
+    go :: [N.NBT] -> Maybe N.NbtContents
+    go [] = Nothing
+    go lst =
+        let mNC = mapMaybe (getNBTAttr attr) lst
+        in  if length mNC == 0 then Nothing else Just $ head mNC
+
+
+
+-- REST
+
+ahToUp :: Auction -> (Selector, Document, [UpdateOption])
+ahToUp ah =
+    ( ["uuid" =: uuid ah, "start" =: (MongoStamp . startAuction) ah]
+    , toBSON ah
+    , [Upsert]
+    )
+
+txtInDL :: Label -> [Document] -> Text -> Bool
+txtInDL label docs txt = elem (DB.String txt) (map (valueAt label) docs)
+
 quicksort :: Ord a => [a] -> [a]
 quicksort []       = []
 quicksort (p : xs) = (quicksort lesser) ++ [p] ++ (quicksort greater)
   where
     lesser  = filter (< p) xs
     greater = filter (>= p) xs
-
-getItemNames :: [AuctionGroup] -> [Text]
-getItemNames ags = [ gItemName ag | ag <- ags ]
 
 getGroupedAuctions :: Maybe AuctionPage -> [[Auction]]
 getGroupedAuctions (Just ap) = group . quicksort $ auctions ap
@@ -269,125 +367,64 @@ convertToAuctionGroup groupedAuctions =
 
 updateAuctionPage :: Maybe AuctionPage -> Maybe AuctionPage
 updateAuctionPage (Just ap) = Just $ ap { auctions = newAuctions }
-    where newAuctions = map (addReforge . addEnchants . addHpb) $ auctions ap
-updateAuctionPage _ = Nothing 
+    where newAuctions = map (addReforge . addEnchants . addHpb . addAmount) $ auctions ap
+updateAuctionPage _ = Nothing
+
+addAmount :: Auction -> Auction
+addAmount ah = ah { aAmount = newAmount}
+ where
+  count = getAmount $ nbt ah
+  newAmount = maybe 1 getIntTag count
+
+getAmount :: N.NBT -> Maybe N.NbtContents
+getAmount = getNBTAttr "Count"
 
 
--- There are reforges that have the same name as certain items prefixes (wise dragon,strong dragon, superior dragon) These need not be extracted
 addReforge :: Auction -> Auction
 addReforge ah = ah { reforge = reforgeName, itemName = newItemName }
   where
-    oldItemName = itemName ah
-    match       = T.pack $ (T.unpack oldItemName) =~ ("[A-Za-z]+" :: String)
-    reforgeName =
-        if isValidReforge match oldItemName then match else reforge ah
-    newItemName = if reforgeName /= reforge ah
-        then dropN ((T.length reforgeName) + 1) oldItemName
-        else oldItemName
+    modifier = getReforge $ nbt ah
+    reforgeName = maybe (reforge ah) getStringTag modifier
+    newItemName = if isNothing modifier then itemName ah else dropN (length modifier) (itemName ah)
 
+getReforge :: N.NBT -> Maybe N.NbtContents
+getReforge = getNBTAttr "modifier"
 
-isValidReforge :: Text -> Text -> Bool
-isValidReforge reforge item =
-    elem reforge allReforges
-        && (  (notElem reforge annoyingReforges)
-           || (not $ any
-                  (uncurry T.isPrefixOf)
-                  [ (annItem, item) | annItem <- itemsWithRefPref ]
-              )
-           )
+getStringTag :: N.NbtContents -> Text
+getStringTag (N.StringTag txt) = txt
 
-itemsWithRefPref = ["Wise Dragon", "Superior Dragon", "Strong Dragon"]
-
-annoyingReforges = ["Wise", "Superior", "Strong"]
+getIntTag :: N.NbtContents -> Int
+getIntTag (N.IntTag n) = fromIntegral n
 
 addEnchants :: Auction -> Auction
 addEnchants ah = ah { enchants = newEnchants }
   where
-    extraInfo = T.unpack $ itemLore ah
-    enchantsStr =
-        getAllTextMatches ((extraInfo :: String) =~ ("9[A-Za-z ]+" :: String)) :: [ String
-            ]
-    newEnchants = if length enchantsStr /= 0
-        then filter (`elem` allEnchants) $ map (dropN 1 . T.pack) enchantsStr
-        else ["None"]
+    enchant' = getEnchantsFromNbt $ nbt ah
+    newEnchants = maybe [] getEnchants enchant'
+
+getEnchants :: N.NbtContents -> [Text]
+getEnchants (N.CompoundTag nbts) = [nbtEnchantToText nbt | nbt <- nbts]
+ where
+     nbtEnchantToText :: N.NBT -> Text
+     nbtEnchantToText (N.NBT enchantName (N.IntTag n)) = T.pack $ (T.unpack enchantName) ++ ((intToRoman . fromIntegral) n)
+
+getEnchantsFromNbt :: N.NBT -> Maybe N.NbtContents
+getEnchantsFromNbt = getNBTAttr "enchantments"
+
 
 addHpb :: Auction -> Auction
-addHpb ah = ah { hpb = newHpb } where newHpb = round $ getHpbAmount ah
+addHpb ah = ah { hpb = newHpb }
+ where 
+     hpbAmount = getHpb $ nbt ah
+     newHpb = maybe 0 getIntTag hpbAmount
 
-getHpbAmount :: Auction -> Double
-getHpbAmount ah | cat == "armor"  = amount / 4.0
-                | cat == "weapon" = amount / 2.0
-                | otherwise       = 0
-  where
-    cat    = category ah
-    lore   = T.unpack $ itemLore ah
-    amount = read $ matchHpb lore
-
-matchHpb :: String -> String
-matchHpb lore = head subMatch
-  where
-    match =
-        (lore :: String) =~ ("\\(\\+([0-9]+)\\)" :: String) :: ( String
-            , String
-            , String
-            , [String]
-            )
-    stub     = fourth4 match
-    subMatch = if length stub /= 0 then stub else ["0"]
+getHpb :: N.NBT -> Maybe N.NbtContents
+getHpb = getNBTAttr "hot_potato_count"
 
 dropN :: Int -> Text -> Text
 dropN n ""   = T.empty
 dropN 0 text = text
 dropN n text = dropN (n - 1) $ T.tail text
-
-
-allReforges :: [Text]
-allReforges =
-    [ "Bizarre"
-    , "Clean"
-    , "Deadly"
-    , "Demonic"
-    , "Epic"
-    , "Fair"
-    , "Fast"
-    , "Fierce"
-    , "Fine"
-    , "Forceful"
-    , "Gentle"
-    , "Godly"
-    , "Grand"
-    , "Hasty"
-    , "Heavy"
-    , "Heroic"
-    , "Hurtful"
-    , "Itchy"
-    , "Keen"
-    , "Legendary"
-    , "Light"
-    , "Mythic"
-    , "Neat"
-    , "Odd"
-    , "Ominous"
-    , "Pleasant"
-    , "Pretty"
-    , "Pure"
-    , "Rapid"
-    , "Rich"
-    , "Shiny"
-    , "Simple"
-    , "Smart"
-    , "Spicy"
-    , "Strange"
-    , "Strong"
-    , "Superior"
-    , "Titanic"
-    , "Unpleasant"
-    , "Unreal"
-    , "Vivid"
-    , "Very"
-    , "Wise"
-    , "Zealous"
-    ]
 
 convMap = [(10, "X"), (9, "IX"), (5, "V"), (4, "IV"), (1, "I")]
 
@@ -398,76 +435,3 @@ intToRoman = concat . unfoldr findLeast
         Just (x, r) -> Just (r, n - x)
         Nothing     -> Nothing
         where i = find (\(val, _) -> val <= n) convMap
-
-enchantsMaxLevel :: [(String, Int)]
-enchantsMaxLevel =
-    [ ("Cleave"               , 5)
-    , ("Critical"             , 6)
-    , ("Cubism"               , 5)
-    , ("Ender Slayer"         , 6)
-    , ("Execute"              , 5)
-    , ("Experience"           , 4)
-    , ("First Strike"         , 4)
-    , ("Giant Killer"         , 6)
-    , ("Impaling"             , 3)
-    , ("Lethality"            , 5)
-    , ("Life Steal"           , 4)
-    , ("Luck"                 , 6)
-    , ("Scavenger"            , 4)
-    , ("Thunderlord"          , 5)
-    , ("Telekinesis"          , 1)
-    , ("Vampirism"            , 6)
-    , ("Venomous"             , 5)
-    , ("Growth"               , 6)
-    , ("Sugar Rush"           , 3)
-    , ("True Protection"      , 1)
-    , ("Aiming"               , 5)
-    , ("Dragon Hunter"        , 5)
-    , ("Impaling"             , 3)
-    , ("Infinite Quiver"      , 5)
-    , ("Piercing"             , 1)
-    , ("Snipe"                , 3)
-    , ("Experience"           , 3)
-    , ("Harvesting"           , 5)
-    , ("Rainbow"              , 1)
-    , ("Smelting Touch"       , 1)
-    , ("Angler"               , 6)
-    , ("Blessing"             , 5)
-    , ("Caster"               , 6)
-    , ("Frail"                , 6)
-    , ("Magnet"               , 6)
-    , ("Spiked Hook"          , 6)
-    , ("Bane of Anthropods"   , 6)
-    , ("Fire Aspect"          , 2)
-    , ("Looting"              , 4)
-    , ("Knockback"            , 2)
-    , ("Sharpness"            , 6)
-    , ("Smite"                , 6)
-    , ("Aqua Affinity"        , 1)
-    , ("Blast Protection"     , 5)
-    , ("Depth Strider"        , 3)
-    , ("Feather Falling"      , 5)
-    , ("Fire Protection"      , 5)
-    , ("Frost Walker"         , 2)
-    , ("Projectile Protection", 5)
-    , ("Protection"           , 6)
-    , ("Respiration"          , 3)
-    , ("Thorns"               , 3)
-    , ("Flame"                , 1)
-    , ("Power"                , 6)
-    , ("Punch"                , 2)
-    , ("Efficiency"           , 5)
-    , ("Fortune"              , 3)
-    , ("Silk Touch"           , 1)
-    , ("Lure"                 , 6)
-    , ("Luck of the Sea"      , 6)
-    ]
-
-enchantVariants :: (String, Int) -> [Text]
-enchantVariants (str, maxLevel) =
-    [ T.pack $ str ++ " " ++ intToRoman lvl | lvl <- [1 .. maxLevel] ]
-
-allEnchants :: [Text]
-allEnchants = concatMap enchantVariants enchantsMaxLevel
-
-
