@@ -29,12 +29,12 @@ dependencies:
 - bytestring
 - text
 - mtl
-- hledger-lib 
 - nbt
 - cereal
 - zlib
 - base64-bytestring
 - array
+- retry
 
 library:
   source-dirs: src

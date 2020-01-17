@@ -19,7 +19,6 @@ import           Data.Either                    ( fromRight )
 import           Data.Text                      ( Text )
 import qualified Data.Text                     as T
 import           Data.Text.Lazy.Encoding        ( encodeUtf8 )
-import           Hledger.Utils
 import           Database.MongoDB        hiding ( find
                                                 , group
                                                 , sort
@@ -39,15 +38,28 @@ import qualified Data.Serialize                as S
 import qualified Codec.Compression.GZip        as GZ
 import qualified Data.ByteString.Base64.Lazy   as B64
                                                 ( decode )
+import           Control.Concurrent
+import           Control.Retry
+import           Control.Monad
+--import used for robustness sake. If an api call (to db or to endpoint) fails we'll retry after a certain amount of time. Time will be calculated experimentally
+
+
 
 main :: IO ()
 main = do
     pipe <- connect $ host "127.0.0.1"
-    ap   <- getAuctionPage 0
-    let storePages =
-            sequence' [ handlePage x | x <- [0 .. (totalPages $ fromJust ap)] ]
-    storePages
-    putStr "Done\n"
+    mv <- newMVar []
+    c1 <- newChan
+    c2 <- newChan 
+    forkIO $ apProducer c1 mv pipe
+    forkIO $ replicateM_ 10 $ apConsumer c1 c2
+    forkIO $ replicateM_ 10 $ agConsumer c2 mv pipe
+    print "Threads created.\n"
+    -- make main wait forever
+    getLine
+    print "Finished.\n"
+
+
 
 
 -- DATA TYPES FOR JSON --
@@ -195,34 +207,68 @@ instance ToBSON Bid where
 -- Functions
 
 -- IO (Database and API requests)
+restDelayPolicy :: RetryPolicy
+restDelayPolicy = constantDelay 1000000 <> limitRetries 5
 
+apProducer :: Chan Int -> MVar [Document] -> Pipe -> IO ()
+apProducer c mv p = forever $ do
+    print "Getting auction page 0"
+    dl <- takeMVar mv
+    let runDb = access p master "HypixelAH"
+    allItems <- runDb getAllItems
+    putMVar mv allItems
+    let f _ = getAuctionPage 0
+    print "Got auction page 0"
+    -- retry 5 times to get the auction page. with a delay of 1 second
+    ap0 <- retrying restDelayPolicy (const $ return . isNothing) f
+    if isNothing ap0
+        then do 
+            print "Going to sleep for 30 seconds"
+            sleepS 30 -- If retry policy failed sleep for 30 seconds and try again
+        else do
+            let pages = [0 .. (totalPages . fromJust $ ap0)]
+            writeList2Chan c pages
+            print "going to sleep for 60 seconds"
+            sleepS 60 -- If it succeeded wait for 60 seconds before getting the next batch of pages that need to be read (max calls per min is 120)
+
+apConsumer :: Chan Int -> Chan AuctionGroup -> IO ()
+apConsumer consumeChan produceChan = forever $ do
+    n <- readChan consumeChan
+    let f _ = getAuctionPage n -- I don't care about retry status. If it fails it fails
+    ap <- retrying restDelayPolicy (const $ return . isNothing) f
+    if isNothing ap
+        then writeChan consumeChan n --If we couldn't get page n then put n back onto fifo chan
+        else do
+            let
+                ags =
+                    ( convertToAuctionGroup
+                        . getGroupedAuctions
+                        . updateAuctionPage
+                        . fromJust
+                        )
+                        ap
+            writeList2Chan produceChan ags
+    sleepS 1 -- Sleep 1 sec to definitely make sure that the api limit isn't crossed
+
+agConsumer :: Chan AuctionGroup -> MVar [Document] -> Pipe -> IO ()
+agConsumer c mv p = forever $ do
+    ag <- readChan c
+    let runDb = access p master "HypixelAH"
+        sAG _ = (runDb . storeAuctionGroup) ag
+        sAGM _ = (runDb . storeAuctionGroupMeta) ag
+    -- Try 5 times to store the auction group with 50 ms in between tries
+    retrying retryPolicyDefault (const $ return . failed) sAG
+    dl <- takeMVar mv
+    putMVar mv dl
+    let inDb = txtInDL "itemGroup" dl . gItemName
+    if inDb ag then return () else void $ (runDb . storeAuctionGroupMeta) ag
 
 getCollections :: Pipe -> IO [Collection]
 getCollections pipe = access pipe master "HypixelAH" allCollections
 
-handlePage :: Int -> IO [WriteResult]
-handlePage page = do
-    pipe <- connect $ host "127.0.0.1"
-    ap   <- getAuctionPage page
-    let ags =
-            convertToAuctionGroup . getGroupedAuctions . updateAuctionPage $ ap
-    let runDb = access pipe master "HypixelAH"
-    allItems <- runDb getAllItems
-    let storeNewAgs =
-            sequence'
-                $ (map (runDb . storeAuctionGroupMeta))
-                . (filter
-                      (\x -> not $ txtInDL "itemGroup" allItems $ gItemName x)
-                  )
-                $ ags
-    storeNewAgs
-    let storeAgAuctions = sequence' $ map (runDb . storeAuctionGroup) ags
-    storeAgAuctions
-
-
 -- Stores the item, category and tier of the AuctionGroup provided. Should only be called if the item group is not in the items collection yet
-storeAuctionGroupMeta :: AuctionGroup -> Action IO Value
-storeAuctionGroupMeta = DB.insert "items" . toBSON
+storeAuctionGroupMeta :: AuctionGroup -> Action IO ()
+storeAuctionGroupMeta = insert_ "items" . toBSON
 
 
 storeAuctionGroup :: AuctionGroup -> Action IO WriteResult
@@ -308,11 +354,13 @@ getNBTAttr attr (N.NBT name (N.LongArrayTag arr)) =
 getNBTAttr attr (N.NBT name (N.ListTag arr)) = if name == attr
     then Just $ N.ListTag arr
     else go ems
- where
-  ems = elems arr
-  go :: [N.NbtContents] -> Maybe N.NbtContents
-  go [] = Nothing
-  go ems = let nbcs = mapMaybe (getNBTAttr attr . N.NBT "") ems in if length nbcs == 0 then Nothing else Just $ head nbcs
+  where
+    ems = elems arr
+    go :: [N.NbtContents] -> Maybe N.NbtContents
+    go [] = Nothing
+    go ems =
+        let nbcs = mapMaybe (getNBTAttr attr . N.NBT "") ems
+        in  if length nbcs == 0 then Nothing else Just $ head nbcs
 
 getNBTAttr attr (N.NBT name (N.CompoundTag list)) = if name == attr
     then Just $ N.CompoundTag list
@@ -324,7 +372,10 @@ getNBTAttr attr (N.NBT name (N.CompoundTag list)) = if name == attr
         let mNC = mapMaybe (getNBTAttr attr) lst
         in  if length mNC == 0 then Nothing else Just $ head mNC
 
+sleepMs :: Int -> IO ()
+sleepMs = threadDelay . (*) 1000
 
+sleepS = sleepMs . (*) 1000
 
 -- REST
 
@@ -338,16 +389,14 @@ ahToUp ah =
 txtInDL :: Label -> [Document] -> Text -> Bool
 txtInDL label docs txt = elem (DB.String txt) (map (valueAt label) docs)
 
-quicksort :: Ord a => [a] -> [a]
-quicksort []       = []
-quicksort (p : xs) = (quicksort lesser) ++ [p] ++ (quicksort greater)
+updateAuctionPage :: AuctionPage -> AuctionPage
+updateAuctionPage ap = ap { auctions = newAuctions }
   where
-    lesser  = filter (< p) xs
-    greater = filter (>= p) xs
+    newAuctions =
+        map (addReforge . addEnchants . addHpb . addAmount) $ auctions ap
 
-getGroupedAuctions :: Maybe AuctionPage -> [[Auction]]
-getGroupedAuctions (Just ap) = group . quicksort $ auctions ap
-getGroupedAuctions _         = []
+getGroupedAuctions :: AuctionPage -> [[Auction]]
+getGroupedAuctions = group . quicksort . auctions
 
 convertToAuctionGroup :: [[Auction]] -> [AuctionGroup]
 convertToAuctionGroup groupedAuctions =
@@ -358,16 +407,18 @@ convertToAuctionGroup groupedAuctions =
     ]
     where newItemName = itemName . head
 
-updateAuctionPage :: Maybe AuctionPage -> Maybe AuctionPage
-updateAuctionPage (Just ap) = Just $ ap { auctions = newAuctions }
-    where newAuctions = map (addReforge . addEnchants . addHpb . addAmount) $ auctions ap
-updateAuctionPage _ = Nothing
+quicksort :: Ord a => [a] -> [a]
+quicksort []       = []
+quicksort (p : xs) = (quicksort lesser) ++ [p] ++ (quicksort greater)
+  where
+    lesser  = filter (< p) xs
+    greater = filter (>= p) xs
 
 addAmount :: Auction -> Auction
-addAmount ah = ah { aAmount = newAmount}
- where
-  count = getAmount $ nbt ah
-  newAmount = maybe 1 getInt count
+addAmount ah = ah { aAmount = newAmount }
+  where
+    count     = getAmount $ nbt ah
+    newAmount = maybe 1 getInt count
 
 getAmount :: N.NBT -> Maybe N.NbtContents
 getAmount = getNBTAttr "Count"
@@ -377,18 +428,21 @@ getAmount = getNBTAttr "Count"
 addReforge :: Auction -> Auction
 addReforge ah = ah { reforge = mod', itemName = newItemName }
   where
-    modifier = getReforge $ nbt ah
+    modifier    = getReforge $ nbt ah
     reforgeName = maybe (reforge ah) getStringTag modifier
-    mod' = if reforgeName `elem` weirdMods then fst $ T.span (\x -> x `notElem` "_") reforgeName else reforgeName
-    newItemName = if isNothing modifier then itemName ah else getItemNameWithoutMod $ itemName ah
+    mod'        = if reforgeName `elem` weirdMods
+        then fst $ T.span (\x -> x `notElem` "_") reforgeName
+        else reforgeName
+    newItemName = if isNothing modifier
+        then itemName ah
+        else getItemNameWithoutMod $ itemName ah
 
 getItemNameWithoutMod :: Text -> Text
 getItemNameWithoutMod txt = itemName
- where
-     itemName = (dropN 1 . snd) $ T.span (\x -> x `notElem` " ") txt
+    where itemName = (dropN 1 . snd) $ T.span (\x -> x `notElem` " ") txt
 
 weirdMods :: [Text]
-weirdMods = ["rich_sword","odd_sword","rich_bow","odd_bow"]
+weirdMods = ["rich_sword", "odd_sword", "rich_bow", "odd_bow"]
 
 getReforge :: N.NBT -> Maybe N.NbtContents
 getReforge = getNBTAttr "modifier"
@@ -397,23 +451,24 @@ getStringTag :: N.NbtContents -> Text
 getStringTag (N.StringTag txt) = txt
 
 getInt :: N.NbtContents -> Int
-getInt (N.ByteTag n) = fromIntegral n
+getInt (N.ByteTag  n) = fromIntegral n
 getInt (N.ShortTag n) = fromIntegral n
-getInt (N.IntTag n) = fromIntegral n
-getInt (N.LongTag n) = fromIntegral n
-getInt _ = 0
+getInt (N.IntTag   n) = fromIntegral n
+getInt (N.LongTag  n) = fromIntegral n
+getInt _              = 0
 
 addEnchants :: Auction -> Auction
 addEnchants ah = ah { enchants = newEnchants }
   where
-    enchant' = getEnchantsFromNbt $ nbt ah
+    enchant'    = getEnchantsFromNbt $ nbt ah
     newEnchants = maybe [] getEnchants enchant'
 
 getEnchants :: N.NbtContents -> [Text]
-getEnchants (N.CompoundTag nbts) = [nbtEnchantToText nbt | nbt <- nbts]
- where
-     nbtEnchantToText :: N.NBT -> Text
-     nbtEnchantToText (N.NBT enchantName (N.IntTag n)) = T.pack $ (T.unpack enchantName) ++ " " ++ (intToRoman . fromIntegral) n
+getEnchants (N.CompoundTag nbts) = [ nbtEnchantToText nbt | nbt <- nbts ]
+  where
+    nbtEnchantToText :: N.NBT -> Text
+    nbtEnchantToText (N.NBT enchantName (N.IntTag n)) =
+        T.pack $ (T.unpack enchantName) ++ " " ++ (intToRoman . fromIntegral) n
 
 getEnchantsFromNbt :: N.NBT -> Maybe N.NbtContents
 getEnchantsFromNbt = getNBTAttr "enchantments"
@@ -421,9 +476,9 @@ getEnchantsFromNbt = getNBTAttr "enchantments"
 
 addHpb :: Auction -> Auction
 addHpb ah = ah { hpb = newHpb }
- where 
-     hpbAmount = getHpb $ nbt ah
-     newHpb = maybe 0 getInt hpbAmount
+  where
+    hpbAmount = getHpb $ nbt ah
+    newHpb    = maybe 0 getInt hpbAmount
 
 getHpb :: N.NBT -> Maybe N.NbtContents
 getHpb = getNBTAttr "hot_potato_count"
