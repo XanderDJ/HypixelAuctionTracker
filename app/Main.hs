@@ -40,16 +40,8 @@ import qualified Codec.Compression.GZip        as GZ
 import qualified Data.ByteString.Base64.Lazy   as B64
                                                 ( decode )
 
-
 main :: IO ()
 main = do
-    ap <- getAuctionPage 0
-    let nbt' = (map nbt . take 30 . auctions . fromJust) ap
-    sequence' $ map print nbt'
-    return ()
-
-main' :: IO ()
-main' = do
     pipe <- connect $ host "127.0.0.1"
     ap   <- getAuctionPage 0
     let storePages =
@@ -190,6 +182,7 @@ instance ToBSON Auction where
         , "end" =: (MongoStamp . estimatedEnd) ah
         , "reforge" =: reforge ah
         , "hpb" =: hpb ah
+        , "amount" =: aAmount ah
         , "enchants" =: enchants ah
         , "startBid" =: startingBid ah
         , "highestBid" =: highestBidAmount ah
@@ -374,18 +367,28 @@ addAmount :: Auction -> Auction
 addAmount ah = ah { aAmount = newAmount}
  where
   count = getAmount $ nbt ah
-  newAmount = maybe 1 getIntTag count
+  newAmount = maybe 1 getInt count
 
 getAmount :: N.NBT -> Maybe N.NbtContents
 getAmount = getNBTAttr "Count"
 
-
+-- There are a couple of weird things. Some items can have a reforge that has the same name as the prefix of the item. I.e. superior and superior dragon boots. This will then be transformed into very
+-- But in the NBT info it will still say the superior as the reforge and not very. Same goes for strong and wise. This causes names to be shortened in the wrong way
 addReforge :: Auction -> Auction
 addReforge ah = ah { reforge = reforgeName, itemName = newItemName }
   where
     modifier = getReforge $ nbt ah
     reforgeName = maybe (reforge ah) getStringTag modifier
-    newItemName = if isNothing modifier then itemName ah else dropN (length modifier) (itemName ah)
+    mod' = if reforgeName `elem` weirdMods then "None" else  reforgeName
+    newItemName = if isNothing modifier || reforgeName `elem` weirdMods then itemName ah else getItemNameWithoutMod $ itemName ah
+
+getItemNameWithoutMod :: Text -> Text
+getItemNameWithoutMod txt = itemName
+ where
+     itemName = (dropN 1 . snd) $ T.span (\x -> x `notElem` " ") txt
+
+weirdMods :: [Text]
+weirdMods = ["rich_sword","odd_sword","rich_bow","odd_bow"]
 
 getReforge :: N.NBT -> Maybe N.NbtContents
 getReforge = getNBTAttr "modifier"
@@ -393,8 +396,12 @@ getReforge = getNBTAttr "modifier"
 getStringTag :: N.NbtContents -> Text
 getStringTag (N.StringTag txt) = txt
 
-getIntTag :: N.NbtContents -> Int
-getIntTag (N.IntTag n) = fromIntegral n
+getInt :: N.NbtContents -> Int
+getInt (N.ByteTag n) = fromIntegral n
+getInt (N.ShortTag n) = fromIntegral n
+getInt (N.IntTag n) = fromIntegral n
+getInt (N.LongTag n) = fromIntegral n
+getInt _ = 0
 
 addEnchants :: Auction -> Auction
 addEnchants ah = ah { enchants = newEnchants }
@@ -406,7 +413,7 @@ getEnchants :: N.NbtContents -> [Text]
 getEnchants (N.CompoundTag nbts) = [nbtEnchantToText nbt | nbt <- nbts]
  where
      nbtEnchantToText :: N.NBT -> Text
-     nbtEnchantToText (N.NBT enchantName (N.IntTag n)) = T.pack $ (T.unpack enchantName) ++ ((intToRoman . fromIntegral) n)
+     nbtEnchantToText (N.NBT enchantName (N.IntTag n)) = T.pack $ (T.unpack enchantName) ++ " " ++ (intToRoman . fromIntegral) n
 
 getEnchantsFromNbt :: N.NBT -> Maybe N.NbtContents
 getEnchantsFromNbt = getNBTAttr "enchantments"
@@ -416,7 +423,7 @@ addHpb :: Auction -> Auction
 addHpb ah = ah { hpb = newHpb }
  where 
      hpbAmount = getHpb $ nbt ah
-     newHpb = maybe 0 getIntTag hpbAmount
+     newHpb = maybe 0 getInt hpbAmount
 
 getHpb :: N.NBT -> Maybe N.NbtContents
 getHpb = getNBTAttr "hot_potato_count"
