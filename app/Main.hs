@@ -48,9 +48,9 @@ import           Control.Monad
 main :: IO ()
 main = do
     pipe <- connect $ host "127.0.0.1"
-    mv <- newMVar []
-    c1 <- newChan
-    c2 <- newChan 
+    mv   <- newMVar []
+    c1   <- newChan
+    c2   <- newChan
     forkIO $ apProducer c1 mv pipe
     forkIO $ replicateM_ 10 $ apConsumer c1 c2
     forkIO $ replicateM_ 10 $ agConsumer c2 mv pipe
@@ -222,7 +222,7 @@ apProducer c mv p = forever $ do
     -- retry 5 times to get the auction page. with a delay of 1 second
     ap0 <- retrying restDelayPolicy (const $ return . isNothing) f
     if isNothing ap0
-        then do 
+        then do
             print "Going to sleep for 30 seconds"
             sleepS 30 -- If retry policy failed sleep for 30 seconds and try again
         else do
@@ -321,54 +321,34 @@ bsToNBT bs = nbt
     nbt = getNBTFromEither eitherNBT
 
 getNBTAttr :: Text -> N.NBT -> Maybe N.NbtContents
-getNBTAttr attr (N.NBT name (N.ByteTag n)) =
-    if name == attr then Just $ N.ByteTag n else Nothing
-
-getNBTAttr attr (N.NBT name (N.ShortTag n)) =
-    if name == attr then Just $ N.ShortTag n else Nothing
-
-getNBTAttr attr (N.NBT name (N.IntTag n)) =
-    if name == attr then Just $ N.IntTag n else Nothing
-
-getNBTAttr attr (N.NBT name (N.LongTag n)) =
-    if name == attr then Just $ N.LongTag n else Nothing
-
-getNBTAttr attr (N.NBT name (N.FloatTag n)) =
-    if name == attr then Just $ N.FloatTag n else Nothing
-
-getNBTAttr attr (N.NBT name (N.DoubleTag n)) =
-    if name == attr then Just $ N.DoubleTag n else Nothing
-
-getNBTAttr attr (N.NBT name (N.ByteArrayTag arr)) =
-    if name == attr then Just $ N.ByteArrayTag arr else Nothing
-
-getNBTAttr attr (N.NBT name (N.StringTag txt)) =
-    if name == attr then Just $ N.StringTag txt else Nothing
-
-getNBTAttr attr (N.NBT name (N.IntArrayTag arr)) =
-    if name == attr then Just $ N.IntArrayTag arr else Nothing
-
-getNBTAttr attr (N.NBT name (N.LongArrayTag arr)) =
-    if name == attr then Just $ N.LongArrayTag arr else Nothing
-
-getNBTAttr attr (N.NBT name (N.ListTag arr)) = if name == attr
-    then Just $ N.ListTag arr
-    else go ems
+getNBTAttr attr (N.NBT name tag) = case tag of
+    (N.ByteTag   n) -> if name == attr then Just $ N.ByteTag n else Nothing
+    (N.ShortTag  n) -> if name == attr then Just $ N.ShortTag n else Nothing
+    (N.IntTag    n) -> if name == attr then Just $ N.IntTag n else Nothing
+    (N.LongTag   n) -> if name == attr then Just $ N.LongTag n else Nothing
+    (N.FloatTag  n) -> if name == attr then Just $ N.FloatTag n else Nothing
+    (N.DoubleTag n) -> if name == attr then Just $ N.DoubleTag n else Nothing
+    (N.ByteArrayTag arr) ->
+        if name == attr then Just $ N.ByteArrayTag arr else Nothing
+    (N.StringTag txt) ->
+        if name == attr then Just $ N.StringTag txt else Nothing
+    (N.IntArrayTag arr) ->
+        if name == attr then Just $ N.IntArrayTag arr else Nothing
+    (N.LongArrayTag arr) ->
+        if name == attr then Just $ N.LongArrayTag arr else Nothing
+    (N.ListTag arr) -> if name == attr then Just $ N.ListTag arr else goL arr
+    (N.CompoundTag nbts) ->
+        if name == attr then Just $ N.CompoundTag nbts else goC nbts
   where
-    ems = elems arr
-    go :: [N.NbtContents] -> Maybe N.NbtContents
-    go [] = Nothing
-    go ems =
+    goL = (goLEms . elems)
+    goLEms :: [N.NbtContents] -> Maybe N.NbtContents
+    goLEms [] = Nothing
+    goLEms ems =
         let nbcs = mapMaybe (getNBTAttr attr . N.NBT "") ems
         in  if length nbcs == 0 then Nothing else Just $ head nbcs
-
-getNBTAttr attr (N.NBT name (N.CompoundTag list)) = if name == attr
-    then Just $ N.CompoundTag list
-    else go list
-  where
-    go :: [N.NBT] -> Maybe N.NbtContents
-    go [] = Nothing
-    go lst =
+    goC :: [N.NBT] -> Maybe N.NbtContents
+    goC [] = Nothing
+    goC lst =
         let mNC = mapMaybe (getNBTAttr attr) lst
         in  if length mNC == 0 then Nothing else Just $ head mNC
 
