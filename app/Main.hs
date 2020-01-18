@@ -263,9 +263,6 @@ agConsumer c mv p = forever $ do
     let inDb = txtInDL "itemGroup" dl . gItemName
     if inDb ag then return () else void $ (runDb . storeAuctionGroupMeta) ag
 
-getCollections :: Pipe -> IO [Collection]
-getCollections pipe = access pipe master "HypixelAH" allCollections
-
 -- Stores the item, category and tier of the AuctionGroup provided. Should only be called if the item group is not in the items collection yet
 storeAuctionGroupMeta :: AuctionGroup -> Action IO ()
 storeAuctionGroupMeta = insert_ "items" . toBSON
@@ -274,7 +271,12 @@ storeAuctionGroupMeta = insert_ "items" . toBSON
 storeAuctionGroup :: AuctionGroup -> Action IO WriteResult
 storeAuctionGroup ag = updateAll (gItemName ag) (map ahToUp (gAuctions ag))
 
-
+ahToUp :: Auction -> (Selector, Document, [UpdateOption])
+ahToUp ah =
+    ( ["uuid" =: uuid ah, "start" =: (MongoStamp . startAuction) ah]
+    , toBSON ah
+    , [Upsert]
+    )
 
 getAllItems :: Action IO [Document]
 getAllItems = rest =<< DB.find (select [] "items")
@@ -299,15 +301,6 @@ getAuctionPage number = do
         ++ apiKey
     response <- httpLbs request manager
     return (decode (responseBody response) :: Maybe AuctionPage)
-
-
-getKeyUsages :: IO (Response B.ByteString)
-getKeyUsages = do
-    apiKey  <- getHypixelApiKey
-    manager <- newManager tlsManagerSettings
-    request <- parseRequest $ "https://api.hypixel.net/key?=key=" ++ apiKey
-    httpLbs request manager
-
 
 -- PURE
 
@@ -359,12 +352,6 @@ sleepS = sleepMs . (*) 1000
 
 -- REST
 
-ahToUp :: Auction -> (Selector, Document, [UpdateOption])
-ahToUp ah =
-    ( ["uuid" =: uuid ah, "start" =: (MongoStamp . startAuction) ah]
-    , toBSON ah
-    , [Upsert]
-    )
 
 txtInDL :: Label -> [Document] -> Text -> Bool
 txtInDL label docs txt = elem (DB.String txt) (map (valueAt label) docs)
