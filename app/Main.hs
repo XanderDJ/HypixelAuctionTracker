@@ -11,7 +11,7 @@ import qualified Data.ByteString.Lazy          as B
 import           Data.Aeson              hiding ( Value
                                                 , Array
                                                 )
-import           Data.List               hiding ( delete )
+import           Data.List
 import           Data.Array
 import           Data.Int
 import           Data.Maybe
@@ -21,8 +21,6 @@ import qualified Data.Text                     as T
 import           Data.Text.Lazy.Encoding        ( encodeUtf8 )
 import           Database.MongoDB        hiding ( find
                                                 , group
-                                                , sort
-                                                , insert
                                                 , Array
                                                 )
 import qualified Database.MongoDB              as DB
@@ -171,7 +169,7 @@ instance FromJSON Bid where
         auctionId <- jsn .: "auction_id"
         amount    <- jsn .: "amount"
         timestamp <- jsn .: "timestamp"
-        return $ Bid { auctionId = auctionId
+        return Bid { auctionId = auctionId
                      , amount    = amount
                      , ts        = fromIntegral timestamp
                      }
@@ -296,7 +294,7 @@ getAuctionPage number = do
     request <-
         parseRequest
         $  "https://api.hypixel.net/skyblock/auctions?page="
-        ++ (show number)
+        ++ show number
         ++ "&key="
         ++ apiKey
     response <- httpLbs request manager
@@ -333,17 +331,17 @@ getNBTAttr attr (N.NBT name tag) = case tag of
     (N.CompoundTag nbts) ->
         if name == attr then Just $ N.CompoundTag nbts else goC nbts
   where
-    goL = (goLEms . elems)
+    goL = goLEms . elems
     goLEms :: [N.NbtContents] -> Maybe N.NbtContents
     goLEms [] = Nothing
     goLEms ems =
         let nbcs = mapMaybe (getNBTAttr attr . N.NBT "") ems
-        in  if length nbcs == 0 then Nothing else Just $ head nbcs
+        in  if null nbcs then Nothing else Just $ head nbcs
     goC :: [N.NBT] -> Maybe N.NbtContents
     goC [] = Nothing
     goC lst =
         let mNC = mapMaybe (getNBTAttr attr) lst
-        in  if length mNC == 0 then Nothing else Just $ head mNC
+        in  if null mNC then Nothing else Just $ head mNC
 
 sleepMs :: Int -> IO ()
 sleepMs = threadDelay . (*) 1000
@@ -354,7 +352,7 @@ sleepS = sleepMs . (*) 1000
 
 
 txtInDL :: Label -> [Document] -> Text -> Bool
-txtInDL label docs txt = elem (DB.String txt) (map (valueAt label) docs)
+txtInDL label docs txt = DB.String txt `elem` map (valueAt label) docs
 
 updateAuctionPage :: AuctionPage -> AuctionPage
 updateAuctionPage ap = ap { auctions = newAuctions }
@@ -376,7 +374,7 @@ convertToAuctionGroup groupedAuctions =
 
 quicksort :: Ord a => [a] -> [a]
 quicksort []       = []
-quicksort (p : xs) = (quicksort lesser) ++ [p] ++ (quicksort greater)
+quicksort (p : xs) = quicksort lesser ++ [p] ++ quicksort greater
   where
     lesser  = filter (< p) xs
     greater = filter (>= p) xs
@@ -398,7 +396,7 @@ addReforge ah = ah { reforge = mod', itemName = newItemName }
     modifier    = getReforge $ nbt ah
     reforgeName = maybe (reforge ah) getStringTag modifier
     mod'        = if reforgeName `elem` weirdMods
-        then fst $ T.span (\x -> x `notElem` "_") reforgeName
+        then fst $ T.span (`notElem` "_") reforgeName
         else reforgeName
     newItemName = if isNothing modifier
         then itemName ah
@@ -406,7 +404,7 @@ addReforge ah = ah { reforge = mod', itemName = newItemName }
 
 getItemNameWithoutMod :: Text -> Text
 getItemNameWithoutMod txt = itemName
-    where itemName = (dropN 1 . snd) $ T.span (\x -> x `notElem` " ") txt
+    where itemName = (dropN 1 . snd) $ T.span (`notElem` " ") txt
 
 weirdMods :: [Text]
 weirdMods = ["rich_sword", "odd_sword", "rich_bow", "odd_bow"]
@@ -435,7 +433,7 @@ getEnchants (N.CompoundTag nbts) = [ nbtEnchantToText nbt | nbt <- nbts ]
   where
     nbtEnchantToText :: N.NBT -> Text
     nbtEnchantToText (N.NBT enchantName (N.IntTag n)) =
-        T.pack $ (T.unpack enchantName) ++ " " ++ (intToRoman . fromIntegral) n
+        T.pack $ T.unpack enchantName ++ " " ++ (intToRoman . fromIntegral) n
 
 getEnchantsFromNbt :: N.NBT -> Maybe N.NbtContents
 getEnchantsFromNbt = getNBTAttr "enchantments"
