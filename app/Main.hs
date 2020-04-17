@@ -334,7 +334,7 @@ storeAuctionGroupMeta = insert_ "items" . toBSON
 
 
 storeAuctionGroup :: AuctionGroup -> Action IO WriteResult
-storeAuctionGroup ag = updateAll (gItemName ag) (map ahToUp (gAuctions ag))
+storeAuctionGroup ag = updateAll ((sanitize . gItemName) ag) (map ahToUp (gAuctions ag))
 
 ahToUp :: Auction -> (Selector, Document, [UpdateOption])
 ahToUp ah =
