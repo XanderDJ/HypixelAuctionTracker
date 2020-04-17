@@ -13,6 +13,7 @@ import           Data.Aeson              hiding ( Value
                                                 )
 import           Data.List
 import           Data.Array
+import           Data.Char
 import           Data.Int
 import           Data.Maybe
 import           Data.Either                    ( fromRight )
@@ -61,7 +62,7 @@ commandLine cAp cAg = do
     req <- getLine
     case (T.toLower . T.pack) req of
         "key" -> do {printKeyStatus ; commandLine cAp cAg}
-        "status" -> do {printScraperStatus cAg cAp ; commandLine cAp cAg}
+        "status" -> do {printScraperStatus cAp cAg ; commandLine cAp cAg}
         "quit" -> putStrLn "quitting program, aborting all working threads"
         _ -> commandLine cAp cAg
 
@@ -70,12 +71,20 @@ printKeyStatus = do
     response <- responseApiKey
     print $ getKeyPage response
 
+printScraperStatus :: Chan Int -> Chan AuctionGroup -> IO ()
 printScraperStatus cAp cAg = do
     aps <- getChanContents cAp
     writeList2Chan cAp aps
     ags <- getChanContents cAg
     writeList2Chan cAg ags
     putStrLn $ "The amount of auction pages in queue are " ++ (show . length) aps ++ "\nThe amount of auction groups in queue are " ++ (show . length) ags
+
+
+test = do
+    response <- responseAuctionPage 0
+    let auctionPage = (fromJust . getAuctionPage) response
+    let auctionPage' = updateAuctionPage auctionPage
+    print auctionPage'
 
 -- DATA TYPES FOR JSON --
 data KeyPage = KeyPage Bool KeyStatus
@@ -97,7 +106,7 @@ data AuctionPage =
         page :: Int,
         totalPages :: Int,
         auctions :: [Auction]
-    } deriving Show
+    }
 
 data Auction =
     Auction {
@@ -118,7 +127,7 @@ data Auction =
         claimed :: Bool,
         highestBidAmount :: Int,
         bids :: [Bid]
-    } deriving Show
+    }
 
 data Bid =
     Bid {
@@ -135,6 +144,16 @@ class ToBSON a where
     toBSON :: a -> Document
 
 -- Instances -- 
+
+instance Show AuctionPage where
+    show ap = "Page " ++ show pageNumber ++ "\n" ++ intercalate "\n" auctions'
+        where pageNumber = page ap
+              auctions' = map show (auctions ap)
+
+instance Show Auction where
+    show a = intercalate " : " strs
+        where txts = [sanitize (itemName a), reforge a , extra a , category a]
+              strs = map T.unpack txts
 
 instance Show KeyPage where
     show (KeyPage success status) = show status
@@ -230,7 +249,7 @@ instance ToBSON AuctionGroup where
         let ah    = head . gAuctions $ ahGroup
             cat   = category ah
             tier' = tier ah
-        in  [ "itemGroup" =: gItemName ahGroup
+        in  [ "itemGroup" =: (sanitize . gItemName) ahGroup
             , "category" =: cat
             , "tier" =: tier'
             ]
@@ -356,6 +375,14 @@ responseApiKey = do
 
 -- PURE
 
+-- Sanitize names for database collections and stuff
+sanitize :: Text -> Text
+sanitize = changeSpaces . T.strip  . T.filter f . T.toLower  
+    where 
+        f c = isSpace c || isLower c || isDigit c
+        changeSpaces = T.replace " " "_" 
+
+
 -- | Get the current auctions from the response . Paginated
 getAuctionPage :: Response B.ByteString -> Maybe AuctionPage
 getAuctionPage = decode . responseBody
@@ -440,6 +467,7 @@ quicksort (p : xs) = quicksort lesser ++ [p] ++ quicksort greater
   where
     lesser  = filter (< p) xs
     greater = filter (>= p) xs
+
 
 addAmount :: Auction -> Auction
 addAmount ah = ah { aAmount = newAmount }
