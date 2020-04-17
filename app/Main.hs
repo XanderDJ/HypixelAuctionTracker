@@ -53,14 +53,43 @@ main = do
     forkIO $ replicateM_ 10 $ apConsumer c1 c2
     forkIO $ replicateM_ 10 $ agConsumer c2 mv pipe
     print "Threads created.\n"
-    -- make main wait forever
-    getLine
-    print "Finished.\n"
+    -- make main wait forever and allow command line args to check on status
+    commandLine c1 c2
 
+commandLine :: Chan Int -> Chan AuctionGroup -> IO () 
+commandLine cAp cAg = do
+    req <- getLine
+    case (T.toLower . T.pack) req of
+        "key" -> do {printKeyStatus ; commandLine cAp cAg}
+        "status" -> do {printScraperStatus cAg cAp ; commandLine cAp cAg}
+        "quit" -> putStrLn "quitting program, aborting all working threads"
+        _ -> commandLine cAp cAg
 
+printKeyStatus :: IO ()
+printKeyStatus = do 
+    response <- responseApiKey
+    print $ getKeyPage response
 
+printScraperStatus cAp cAg = do
+    aps <- getChanContents cAp
+    writeList2Chan cAp aps
+    ags <- getChanContents cAg
+    writeList2Chan cAg ags
+    putStrLn $ "The amount of auction pages in queue are " ++ (show . length) aps ++ "\nThe amount of auction groups in queue are " ++ (show . length) ags
 
 -- DATA TYPES FOR JSON --
+data KeyPage = KeyPage Bool KeyStatus
+
+data KeyStatus = KeyStatus {
+    key :: Text,
+    totalQueries :: Int,
+    apiRate :: Int
+}
+
+data AuctionGroup = AuctionGroup {
+    gItemName :: Text,
+    gAuctions :: [Auction]
+} deriving Show
 
 data AuctionPage =
     AuctionPage {
@@ -91,11 +120,6 @@ data Auction =
         bids :: [Bid]
     } deriving Show
 
-data AuctionGroup = AuctionGroup {
-    gItemName :: Text,
-    gAuctions :: [Auction]
-} deriving Show
-
 data Bid =
     Bid {
         auctionId :: Text,
@@ -112,11 +136,37 @@ class ToBSON a where
 
 -- Instances -- 
 
+instance Show KeyPage where
+    show (KeyPage success status) = show status
+
+instance Show KeyStatus where
+    show ks = "Key " ++ key' ++ " has " ++ show total ++ " queries and has a current rate of " ++ show rate ++ " queries per minute"
+        where key' = (T.unpack . key) ks
+              total = totalQueries ks
+              rate = apiRate ks
+
+              
+
 instance Eq Auction where
     x == y = itemName x == itemName y
 
 instance Ord Auction where
     compare x y = compare (itemName x) (itemName y)
+
+instance FromJSON KeyPage where
+    parseJSON (Object jsn) = do
+        success   <- jsn .: "success"
+        record    <- jsn .: "record"
+        keyStatus <- parseJSON record
+        return $ KeyPage success keyStatus
+
+instance FromJSON KeyStatus where
+    parseJSON (Object jsn) = do
+        queries <- jsn .: "totalQueries"
+        key     <- jsn .: "key"
+        rateM    <- jsn .:? "queriesInPastMin"
+        let rate = fromMaybe 0 rateM
+        return $ KeyStatus key queries rate
 
 
 instance FromJSON AuctionPage where
@@ -170,9 +220,9 @@ instance FromJSON Bid where
         amount    <- jsn .: "amount"
         timestamp <- jsn .: "timestamp"
         return Bid { auctionId = auctionId
-                     , amount    = amount
-                     , ts        = fromIntegral timestamp
-                     }
+                   , amount    = amount
+                   , ts        = fromIntegral timestamp
+                   }
 
 
 instance ToBSON AuctionGroup where
@@ -215,10 +265,9 @@ apProducer c mv p = forever $ do
     let runDb = access p master "HypixelAH"
     allItems <- runDb getAllItems
     putMVar mv allItems
-    let f _ = getAuctionPage 0
+    response <- responseAuctionPage 0
     print "Got auction page 0"
-    -- retry 5 times to get the auction page. with a delay of 1 second
-    ap0 <- retrying restDelayPolicy (const $ return . isNothing) f
+    let ap0 = getAuctionPage response
     if isNothing ap0
         then do
             print "Going to sleep for 30 seconds"
@@ -231,9 +280,9 @@ apProducer c mv p = forever $ do
 
 apConsumer :: Chan Int -> Chan AuctionGroup -> IO ()
 apConsumer consumeChan produceChan = forever $ do
-    n <- readChan consumeChan
-    let f _ = getAuctionPage n -- I don't care about retry status. If it fails it fails
-    ap <- retrying restDelayPolicy (const $ return . isNothing) f
+    n        <- readChan consumeChan
+    response <- responseAuctionPage n -- Find a way to handle the Exceptions possibly caused by https client
+    let ap = getAuctionPage response
     if isNothing ap
         then writeChan consumeChan n --If we couldn't get page n then put n back onto fifo chan
         else do
@@ -253,7 +302,6 @@ agConsumer c mv p = forever $ do
     ag <- readChan c
     let runDb = access p master "HypixelAH"
         sAG _ = (runDb . storeAuctionGroup) ag
-        sAGM _ = (runDb . storeAuctionGroupMeta) ag
     -- Try 5 times to store the auction group with 50 ms in between tries
     retrying retryPolicyDefault (const $ return . failed) sAG
     dl <- takeMVar mv
@@ -286,21 +334,35 @@ getAllItems = rest =<< DB.find (select [] "items")
 getHypixelApiKey :: IO String
 getHypixelApiKey = readFile "apikey/HypixelApiKey.txt"
 
--- | Get the current auctions. Paginated
-getAuctionPage :: Int -> IO (Maybe AuctionPage)
-getAuctionPage number = do
+
+responseAuctionPage :: Int -> IO (Response B.ByteString)
+responseAuctionPage n = do
     apiKey  <- getHypixelApiKey
     manager <- newManager tlsManagerSettings
     request <-
         parseRequest
         $  "https://api.hypixel.net/skyblock/auctions?page="
-        ++ show number
+        ++ show n
         ++ "&key="
         ++ apiKey
-    response <- httpLbs request manager
-    return (decode (responseBody response) :: Maybe AuctionPage)
+    httpLbs request manager
+
+responseApiKey :: IO (Response B.ByteString)
+responseApiKey = do
+    apikey  <- getHypixelApiKey
+    manager <- newManager tlsManagerSettings
+    request <- parseRequest $ "https://api.hypixel.net/key?key=" ++ apikey
+    httpLbs request manager
 
 -- PURE
+
+-- | Get the current auctions from the response . Paginated
+getAuctionPage :: Response B.ByteString -> Maybe AuctionPage
+getAuctionPage = decode . responseBody
+
+-- | Get the current key status from the response
+getKeyPage :: Response B.ByteString -> Maybe KeyPage
+getKeyPage = decode . responseBody 
 
 -- NBT RELATED STUFF
 bsToNBT :: B.ByteString -> N.NBT
