@@ -280,7 +280,7 @@ apProducer c mv p = forever $ do
             print "Going to sleep for 30 seconds"
             sleepS 30
         else do
-            let pages = [0 .. (totalPages . fromJust $ ap0)]
+            let pages = [0 .. ((-) 1 . totalPages . fromJust $ ap0)]
                 seconds = 1800
             writeList2Chan c pages
             print $ "going to sleep for " ++ show seconds ++ " seconds"
@@ -293,7 +293,7 @@ apConsumer consumeChan produceChan = forever $ do
     response <- responseAuctionPage n -- Find a way to handle the Exceptions possibly caused by https client
     let ap = getAuctionPage response
     if isNothing ap
-        then writeChan consumeChan n --If we couldn't get page n then put n back onto fifo chan
+        then return ()
         else do
             let ags =
                     (convertToAuctionGroup . getGroupedAuctions . fromJust) ap
