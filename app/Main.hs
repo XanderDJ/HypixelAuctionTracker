@@ -51,23 +51,27 @@ main = do
     c1   <- newChan
     c2   <- newChan
     forkIO $ apProducer c1 mv pipe
-    forkIO $ replicateM_ 10 $ apConsumer c1 c2
-    forkIO $ replicateM_ 10 $ agConsumer c2 mv pipe
+    forkIO $ replicateM_ 5 $ apConsumer c1 c2
+    forkIO $ replicateM_ 15 $ agConsumer c2 mv pipe
     print "Threads created.\n"
     -- make main wait forever and allow command line args to check on status
     commandLine c1 c2
 
-commandLine :: Chan Int -> Chan AuctionGroup -> IO () 
+commandLine :: Chan Int -> Chan AuctionGroup -> IO ()
 commandLine cAp cAg = do
     req <- getLine
     case (T.toLower . T.pack) req of
-        "key" -> do {printKeyStatus ; commandLine cAp cAg}
-        "status" -> do {printScraperStatus cAp cAg ; commandLine cAp cAg}
+        "key" -> do
+            printKeyStatus
+            commandLine cAp cAg
+        "status" -> do
+            printScraperStatus cAp cAg
+            commandLine cAp cAg
         "quit" -> putStrLn "quitting program, aborting all working threads"
-        _ -> commandLine cAp cAg
+        _      -> commandLine cAp cAg
 
 printKeyStatus :: IO ()
-printKeyStatus = do 
+printKeyStatus = do
     response <- responseApiKey
     print $ getKeyPage response
 
@@ -77,14 +81,17 @@ printScraperStatus cAp cAg = do
     writeList2Chan cAp aps
     ags <- getChanContents cAg
     writeList2Chan cAg ags
-    putStrLn $ "The amount of auction pages in queue are " ++ (show . length) aps ++ "\nThe amount of auction groups in queue are " ++ (show . length) ags
+    putStrLn
+        $  "The amount of auction pages in queue are "
+        ++ (show . length) aps
+        ++ "\nThe amount of auction groups in queue are "
+        ++ (show . length) ags
 
 
 test = do
     response <- responseAuctionPage 0
     let auctionPage = (fromJust . getAuctionPage) response
-    let auctionPage' = updateAuctionPage auctionPage
-    print auctionPage'
+    print auctionPage
 
 -- DATA TYPES FOR JSON --
 data KeyPage = KeyPage Bool KeyStatus
@@ -102,8 +109,6 @@ data AuctionGroup = AuctionGroup {
 
 data AuctionPage =
     AuctionPage {
-        succes :: Bool,
-        page :: Int,
         totalPages :: Int,
         auctions :: [Auction]
     }
@@ -114,17 +119,13 @@ data Auction =
         startAuction :: Int64, -- Part of index for the updates
         estimatedEnd :: Int64,
         itemName :: Text,
-        itemLore :: Text,
         reforge :: Text,
         enchants :: [Text],
         hpb ::Int,
         aAmount :: Int,
-        extra :: Text,
         category :: Text,
         tier :: Text,
-        nbt :: N.NBT,
         startingBid :: Int,
-        claimed :: Bool,
         highestBidAmount :: Int,
         bids :: [Bid]
     }
@@ -136,8 +137,6 @@ data Bid =
         ts :: Int64
     } deriving Show
 
-
-
 -- Typeclasses --
 
 class ToBSON a where
@@ -146,25 +145,33 @@ class ToBSON a where
 -- Instances -- 
 
 instance Show AuctionPage where
-    show ap = "Page " ++ show pageNumber ++ "\n" ++ intercalate "\n" auctions'
-        where pageNumber = page ap
-              auctions' = map show (auctions ap)
+    show ap = intercalate "\n" auctions'
+        where auctions' = map show (auctions ap)
 
 instance Show Auction where
     show a = intercalate " : " strs
-        where txts = [sanitize (itemName a), reforge a , extra a , category a]
-              strs = map T.unpack txts
+      where
+        txts = [sanitize (itemName a), reforge a, category a]
+        strs = map T.unpack txts
 
 instance Show KeyPage where
     show (KeyPage success status) = show status
 
 instance Show KeyStatus where
-    show ks = "Key " ++ key' ++ " has " ++ show total ++ " queries and has a current rate of " ++ show rate ++ " queries per minute"
-        where key' = (T.unpack . key) ks
-              total = totalQueries ks
-              rate = apiRate ks
+    show ks =
+        "Key "
+            ++ key'
+            ++ " has "
+            ++ show total
+            ++ " queries and has a current rate of "
+            ++ show rate
+            ++ " queries per minute"
+      where
+        key'  = (T.unpack . key) ks
+        total = totalQueries ks
+        rate  = apiRate ks
 
-              
+
 
 instance Eq Auction where
     x == y = itemName x == itemName y
@@ -183,19 +190,17 @@ instance FromJSON KeyStatus where
     parseJSON (Object jsn) = do
         queries <- jsn .: "totalQueries"
         key     <- jsn .: "key"
-        rateM    <- jsn .:? "queriesInPastMin"
+        rateM   <- jsn .:? "queriesInPastMin"
         let rate = fromMaybe 0 rateM
         return $ KeyStatus key queries rate
 
 
 instance FromJSON AuctionPage where
     parseJSON (Object jsn) = do
-        succes       <- jsn .: "success"
-        page         <- jsn .: "page"
         totalPages   <- jsn .: "totalPages"
         auctions     <- jsn .: "auctions"
         auctionsList <- mapM parseJSON auctions
-        return $ AuctionPage succes page totalPages auctionsList
+        return $ AuctionPage totalPages auctionsList
 
 instance FromJSON Auction where
     parseJSON (Object jsn) = do
@@ -203,34 +208,35 @@ instance FromJSON Auction where
         startAuction     <- jsn .: "start"
         estimatedEnd     <- jsn .: "end"
         itemName         <- jsn .: "item_name"
-        itemLore         <- jsn .: "item_lore"
-        extra            <- jsn .: "extra"
         category         <- jsn .: "category"
         tier             <- jsn .: "tier"
         bytestring       <- jsn .: "item_bytes"
         startingBid      <- jsn .: "starting_bid"
-        claimed          <- jsn .: "claimed"
         highestBidAmount <- jsn .: "highest_bid_amount"
         bids             <- jsn .: "bids"
         bidsList         <- mapM parseJSON bids
-        return $ Auction
-            uuid
-            (fromIntegral startAuction)
-            (fromIntegral estimatedEnd)
-            itemName
-            itemLore
-            "None"
-            ["None"]
-            0
-            1
-            extra
-            category
-            tier
-            ((bsToNBT . fromRight "" . B64.decode . encodeUtf8) bytestring)
-            startingBid
-            claimed
-            highestBidAmount
-            bidsList
+        let nbt = (bsToNBT . fromRight "" . B64.decode . encodeUtf8) bytestring
+            am          = getAmount nbt
+            count       = maybe 1 getInt am
+            reforge     = getReforge nbt
+            properName  = getProperItemName itemName reforge
+            enchant'    = getEnchantsFromNbt nbt
+            newEnchants = maybe ["None"] getEnchants enchant'
+            hpbAmount   = getHpb nbt
+            newHpb      = maybe 0 getInt hpbAmount
+        return $ Auction uuid
+                         (fromIntegral startAuction)
+                         (fromIntegral estimatedEnd)
+                         properName
+                         reforge
+                         newEnchants
+                         newHpb
+                         count
+                         category
+                         tier
+                         startingBid
+                         highestBidAmount
+                         bidsList
 
 
 instance FromJSON Bid where
@@ -274,9 +280,6 @@ instance ToBSON Bid where
 -- Functions
 
 -- IO (Database and API requests)
-restDelayPolicy :: RetryPolicy
-restDelayPolicy = constantDelay 1000000 <> limitRetries 5
-
 apProducer :: Chan Int -> MVar [Document] -> Pipe -> IO ()
 apProducer c mv p = forever $ do
     print "Getting auction page 0"
@@ -295,7 +298,7 @@ apProducer c mv p = forever $ do
             let pages = [0 .. (totalPages . fromJust $ ap0)]
             writeList2Chan c pages
             print "going to sleep for 60 seconds"
-            sleepS 60 -- If it succeeded wait for 60 seconds before getting the next batch of pages that need to be read (max calls per min is 120)
+            sleepS 90 -- If it succeeded wait for 60 seconds before getting the next batch of pages that need to be read (max calls per min is 120)
 
 apConsumer :: Chan Int -> Chan AuctionGroup -> IO ()
 apConsumer consumeChan produceChan = forever $ do
@@ -305,16 +308,9 @@ apConsumer consumeChan produceChan = forever $ do
     if isNothing ap
         then writeChan consumeChan n --If we couldn't get page n then put n back onto fifo chan
         else do
-            let
-                ags =
-                    ( convertToAuctionGroup
-                        . getGroupedAuctions
-                        . updateAuctionPage
-                        . fromJust
-                        )
-                        ap
+            let ags =
+                    (convertToAuctionGroup . getGroupedAuctions . fromJust) ap
             writeList2Chan produceChan ags
-    sleepS 1 -- Sleep 1 sec to definitely make sure that the api limit isn't crossed
 
 agConsumer :: Chan AuctionGroup -> MVar [Document] -> Pipe -> IO ()
 agConsumer c mv p = forever $ do
@@ -334,7 +330,8 @@ storeAuctionGroupMeta = insert_ "items" . toBSON
 
 
 storeAuctionGroup :: AuctionGroup -> Action IO WriteResult
-storeAuctionGroup ag = updateAll ((sanitize . gItemName) ag) (map ahToUp (gAuctions ag))
+storeAuctionGroup ag =
+    updateAll ((sanitize . gItemName) ag) (map ahToUp (gAuctions ag))
 
 ahToUp :: Auction -> (Selector, Document, [UpdateOption])
 ahToUp ah =
@@ -373,14 +370,19 @@ responseApiKey = do
     request <- parseRequest $ "https://api.hypixel.net/key?key=" ++ apikey
     httpLbs request manager
 
+showKeyUsage = do
+    response <- responseApiKey
+    let keyPage = fromJust $ getKeyPage response
+    print keyPage
+
 -- PURE
 
 -- Sanitize names for database collections and stuff
 sanitize :: Text -> Text
-sanitize = changeSpaces . T.strip  . T.filter f . T.toLower  
-    where 
-        f c = isSpace c || isLower c || isDigit c
-        changeSpaces = T.replace " " "_" 
+sanitize = changeSpaces . T.strip . T.filter f . T.toLower
+  where
+    f c = isSpace c || isLower c || isDigit c
+    changeSpaces = T.replace " " "_"
 
 
 -- | Get the current auctions from the response . Paginated
@@ -389,7 +391,7 @@ getAuctionPage = decode . responseBody
 
 -- | Get the current key status from the response
 getKeyPage :: Response B.ByteString -> Maybe KeyPage
-getKeyPage = decode . responseBody 
+getKeyPage = decode . responseBody
 
 -- NBT RELATED STUFF
 bsToNBT :: B.ByteString -> N.NBT
@@ -443,11 +445,6 @@ sleepS = sleepMs . (*) 1000
 txtInDL :: Label -> [Document] -> Text -> Bool
 txtInDL label docs txt = DB.String txt `elem` map (valueAt label) docs
 
-updateAuctionPage :: AuctionPage -> AuctionPage
-updateAuctionPage ap = ap { auctions = newAuctions }
-  where
-    newAuctions =
-        map (addReforge . addEnchants . addHpb . addAmount) $ auctions ap
 
 getGroupedAuctions :: AuctionPage -> [[Auction]]
 getGroupedAuctions = group . quicksort . auctions
@@ -468,29 +465,23 @@ quicksort (p : xs) = quicksort lesser ++ [p] ++ quicksort greater
     lesser  = filter (< p) xs
     greater = filter (>= p) xs
 
-
-addAmount :: Auction -> Auction
-addAmount ah = ah { aAmount = newAmount }
-  where
-    count     = getAmount $ nbt ah
-    newAmount = maybe 1 getInt count
-
 getAmount :: N.NBT -> Maybe N.NbtContents
 getAmount = getNBTAttr "Count"
 
 -- There are a couple of weird things. Some items can have a reforge that has the same name as the prefix of the item. I.e. superior and superior dragon boots. This will then be transformed into very
 -- But in the NBT info it will still say the superior as the reforge and not very. Same goes for strong and wise. This causes names to be shortened in the wrong way
-addReforge :: Auction -> Auction
-addReforge ah = ah { reforge = mod', itemName = newItemName }
+getReforge :: N.NBT -> Text
+getReforge nbt = mod'
   where
-    modifier    = getReforge $ nbt ah
-    reforgeName = maybe (reforge ah) getStringTag modifier
+    modifier    = getReforgeNBT nbt
+    reforgeName = maybe "None" getStringTag modifier
     mod'        = if reforgeName `elem` weirdMods
         then fst $ T.span (`notElem` "_") reforgeName
         else reforgeName
-    newItemName = if isNothing modifier
-        then itemName ah
-        else getItemNameWithoutMod $ itemName ah
+
+getProperItemName :: Text -> Text -> Text
+getProperItemName name reforge =
+    if T.toLower reforge == "none" then name else getItemNameWithoutMod name
 
 getItemNameWithoutMod :: Text -> Text
 getItemNameWithoutMod txt = itemName
@@ -499,8 +490,8 @@ getItemNameWithoutMod txt = itemName
 weirdMods :: [Text]
 weirdMods = ["rich_sword", "odd_sword", "rich_bow", "odd_bow"]
 
-getReforge :: N.NBT -> Maybe N.NbtContents
-getReforge = getNBTAttr "modifier"
+getReforgeNBT :: N.NBT -> Maybe N.NbtContents
+getReforgeNBT = getNBTAttr "modifier"
 
 getStringTag :: N.NbtContents -> Text
 getStringTag (N.StringTag txt) = txt
@@ -512,12 +503,6 @@ getInt (N.IntTag   n) = fromIntegral n
 getInt (N.LongTag  n) = fromIntegral n
 getInt _              = 0
 
-addEnchants :: Auction -> Auction
-addEnchants ah = ah { enchants = newEnchants }
-  where
-    enchant'    = getEnchantsFromNbt $ nbt ah
-    newEnchants = maybe [] getEnchants enchant'
-
 getEnchants :: N.NbtContents -> [Text]
 getEnchants (N.CompoundTag nbts) = [ nbtEnchantToText nbt | nbt <- nbts ]
   where
@@ -527,13 +512,6 @@ getEnchants (N.CompoundTag nbts) = [ nbtEnchantToText nbt | nbt <- nbts ]
 
 getEnchantsFromNbt :: N.NBT -> Maybe N.NbtContents
 getEnchantsFromNbt = getNBTAttr "enchantments"
-
-
-addHpb :: Auction -> Auction
-addHpb ah = ah { hpb = newHpb }
-  where
-    hpbAmount = getHpb $ nbt ah
-    newHpb    = maybe 0 getInt hpbAmount
 
 getHpb :: N.NBT -> Maybe N.NbtContents
 getHpb = getNBTAttr "hot_potato_count"
