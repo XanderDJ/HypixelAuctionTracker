@@ -43,6 +43,10 @@ import           Control.Monad
 --import used for robustness sake. If an api call (to db or to endpoint) fails we'll retry after a certain amount of time. Time will be calculated experimentally
 
 
+-- global "Variables"
+sleepTime :: Int
+sleepTime = 300
+
 
 main :: IO ()
 main = do
@@ -285,9 +289,8 @@ apProducer mvint mvd p = forever $ do
             sleepS 30
         else do
             putMVar mvint ((totalPages . fromJust ) ap0)
-            let seconds = 1800
-            print $ "going to sleep for " ++ show seconds ++ " seconds"
-            sleepS seconds -- If it succeeded wait for 60 seconds before getting the next batch of pages that need to be read (max calls per min is 120)
+            print $ "going to sleep for " ++ show sleepTime  ++ " seconds"
+            sleepS sleepTime  -- If it succeeded wait for 60 seconds before getting the next batch of pages that need to be read (max calls per min is 120)
 
 apConsumer :: MVar Int -> Chan AuctionGroup -> IO ()
 apConsumer mvint produceChan = forever $ do
