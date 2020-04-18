@@ -46,12 +46,13 @@ import           Control.Monad
 
 main :: IO ()
 main = do
+    p <- connect $ host "127.0.0.1"
     mv   <- newMVar []
     c1   <- newChan
     c2   <- newChan
-    forkIO $ apProducer c1 mv
+    forkIO $ apProducer c1 mv p
     forkIO $ apConsumer c1 c2
-    forkIO $ replicateM_ 15 $ agConsumer c2 mv
+    forkIO $ replicateM_ 5 $ agConsumer c2 mv p
     print "Threads created.\n"
     -- make main wait forever and allow command line args to check on status
     commandLine c1 c2
@@ -267,9 +268,8 @@ instance ToBSON Bid where
 -- Functions
 
 -- IO (Database and API requests)
-apProducer :: Chan Int -> MVar [Document]-> IO ()
-apProducer c mv = forever $ do
-    p <- connect $ host "127.0.0.1"
+apProducer :: Chan Int -> MVar [Document]-> Pipe -> IO ()
+apProducer c mv p = forever $ do
     print "Getting auction page 0"
     dl <- takeMVar mv
     let runDb = access p master "HypixelAH"
@@ -288,24 +288,18 @@ apProducer c mv = forever $ do
             writeList2Chan c pages
             print $ "going to sleep for " ++ show seconds ++ " seconds"
             sleepS seconds -- If it succeeded wait for 60 seconds before getting the next batch of pages that need to be read (max calls per min is 120)
-    close p
 
 apConsumer :: Chan Int -> Chan AuctionGroup -> IO ()
 apConsumer consumeChan produceChan = forever $ do
-    n        <- readChan consumeChan
-    putStrLn $ "APC: " ++ show n
-    response <- responseAuctionPage n -- Find a way to handle the Exceptions possibly caused by https client
-    let ap = getAuctionPage response
-    if isNothing ap
-        then return ()
-        else do
-            let ags =
-                    (convertToAuctionGroup . getGroupedAuctions . fromJust) ap
-            writeList2Chan produceChan ags
+    n        <- getChanContents consumeChan
+    responses <- mapM responseAuctionPage n -- Find a way to handle the Exceptions possibly caused by https client
+    let aps = map (fromJust . getAuctionPage) responses -- throws error when a page fails
+        as = concatMap auctions aps
+        ags = (convertToAuctionGroup . getGroupedAuctions) as
+    writeList2Chan produceChan ags
 
-agConsumer :: Chan AuctionGroup -> MVar [Document] -> IO ()
-agConsumer c mv = forever $ do
-    p <- connect $ host "127.0.0.1"
+agConsumer :: Chan AuctionGroup -> MVar [Document] -> Pipe ->  IO ()
+agConsumer c mv p = forever $ do
     ag <- readChan c
     let runDb = access p master "HypixelAH"
         sAG _ = (runDb . storeAuctionGroup) ag
@@ -316,7 +310,6 @@ agConsumer c mv = forever $ do
     putMVar mv dl
     let inDb = txtInDL "itemGroup" dl . gItemName
     if inDb ag then return () else void $ (runDb . storeAuctionGroupMeta) ag
-    close p
 
 -- Stores the item, category and tier of the AuctionGroup provided. Should only be called if the item group is not in the items collection yet
 storeAuctionGroupMeta :: AuctionGroup -> Action IO ()
@@ -440,8 +433,8 @@ txtInDL :: Label -> [Document] -> Text -> Bool
 txtInDL label docs txt = DB.String txt `elem` map (valueAt label) docs
 
 
-getGroupedAuctions :: AuctionPage -> [[Auction]]
-getGroupedAuctions = group . quicksort . auctions
+getGroupedAuctions :: [Auction] -> [[Auction]]
+getGroupedAuctions = group . quicksort 
 
 convertToAuctionGroup :: [[Auction]] -> [AuctionGroup]
 convertToAuctionGroup groupedAuctions =
