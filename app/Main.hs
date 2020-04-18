@@ -46,13 +46,12 @@ import           Control.Monad
 
 main :: IO ()
 main = do
-    pipe <- connect $ host "127.0.0.1"
     mv   <- newMVar []
     c1   <- newChan
     c2   <- newChan
-    forkIO $ apProducer c1 mv pipe
+    forkIO $ apProducer c1 mv
     forkIO $ apConsumer c1 c2
-    forkIO $ replicateM_ 15 $ agConsumer c2 mv pipe
+    forkIO $ replicateM_ 15 $ agConsumer c2 mv
     print "Threads created.\n"
     -- make main wait forever and allow command line args to check on status
     commandLine c1 c2
@@ -265,8 +264,9 @@ instance ToBSON Bid where
 -- Functions
 
 -- IO (Database and API requests)
-apProducer :: Chan Int -> MVar [Document] -> Pipe -> IO ()
-apProducer c mv p = forever $ do
+apProducer :: Chan Int -> MVar [Document]-> IO ()
+apProducer c mv = forever $ do
+    p <- connect $ host "127.0.0.1"
     print "Getting auction page 0"
     dl <- takeMVar mv
     let runDb = access p master "HypixelAH"
@@ -285,6 +285,7 @@ apProducer c mv p = forever $ do
             writeList2Chan c pages
             print $ "going to sleep for " ++ show seconds ++ " seconds"
             sleepS seconds -- If it succeeded wait for 60 seconds before getting the next batch of pages that need to be read (max calls per min is 120)
+    close p
 
 apConsumer :: Chan Int -> Chan AuctionGroup -> IO ()
 apConsumer consumeChan produceChan = forever $ do
@@ -299,8 +300,9 @@ apConsumer consumeChan produceChan = forever $ do
                     (convertToAuctionGroup . getGroupedAuctions . fromJust) ap
             writeList2Chan produceChan ags
 
-agConsumer :: Chan AuctionGroup -> MVar [Document] -> Pipe -> IO ()
-agConsumer c mv p = forever $ do
+agConsumer :: Chan AuctionGroup -> MVar [Document] -> IO ()
+agConsumer c mv = forever $ do
+    p <- connect $ host "127.0.0.1"
     ag <- readChan c
     let runDb = access p master "HypixelAH"
         sAG _ = (runDb . storeAuctionGroup) ag
@@ -311,6 +313,7 @@ agConsumer c mv p = forever $ do
     putMVar mv dl
     let inDb = txtInDL "itemGroup" dl . gItemName
     if inDb ag then return () else void $ (runDb . storeAuctionGroupMeta) ag
+    close p
 
 -- Stores the item, category and tier of the AuctionGroup provided. Should only be called if the item group is not in the items collection yet
 storeAuctionGroupMeta :: AuctionGroup -> Action IO ()
