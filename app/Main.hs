@@ -89,7 +89,7 @@ data KeyStatus = KeyStatus {
 data AuctionGroup = AuctionGroup {
     gItemName :: Text,
     gAuctions :: [Auction]
-} deriving Show
+}
 
 data AuctionPage =
     AuctionPage {
@@ -127,6 +127,9 @@ class ToBSON a where
     toBSON :: a -> Document
 
 -- Instances -- 
+
+instance Show AuctionGroup where
+    show ag = (T.unpack . gItemName) ag ++ " with " ++ (show . length  . gAuctions) ag ++ " auctions"
 
 instance Show AuctionPage where
     show ap = intercalate "\n" auctions'
@@ -308,7 +311,7 @@ agConsumer c mv = forever $ do
         sAG _ = (runDb . storeAuctionGroup) ag
     -- Try 5 times to store the auction group with 50 ms in between tries
     retrying retryPolicyDefault (const $ return . failed) sAG
-    print "AGC : worked"
+    putStrLn $ "AGC : " ++ show ag
     dl <- takeMVar mv
     putMVar mv dl
     let inDb = txtInDL "itemGroup" dl . gItemName
