@@ -51,7 +51,7 @@ main = do
     c1   <- newChan
     c2   <- newChan
     forkIO $ apProducer c1 mv pipe
-    forkIO $ replicateM_ 5 $ apConsumer c1 c2
+    forkIO $ apConsumer c1 c2
     forkIO $ replicateM_ 15 $ agConsumer c2 mv pipe
     print "Threads created.\n"
     -- make main wait forever and allow command line args to check on status
@@ -281,10 +281,10 @@ apProducer c mv p = forever $ do
             sleepS 30
         else do
             let pages = [0 .. (totalPages . fromJust $ ap0)]
-            print $ "APP" ++ show pages
+                seconds = 1800
             writeList2Chan c pages
-            print "going to sleep for 60 seconds"
-            sleepS 1800 -- If it succeeded wait for 60 seconds before getting the next batch of pages that need to be read (max calls per min is 120)
+            print $ "going to sleep for " ++ show seconds ++ " seconds"
+            sleepS seconds -- If it succeeded wait for 60 seconds before getting the next batch of pages that need to be read (max calls per min is 120)
 
 apConsumer :: Chan Int -> Chan AuctionGroup -> IO ()
 apConsumer consumeChan produceChan = forever $ do
