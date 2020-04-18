@@ -64,9 +64,6 @@ commandLine cAp cAg = do
         "key" -> do
             printKeyStatus
             commandLine cAp cAg
-        "status" -> do
-            printScraperStatus cAp cAg
-            commandLine cAp cAg
         "quit" -> putStrLn "quitting program, aborting all working threads"
         _      -> commandLine cAp cAg
 
@@ -74,18 +71,6 @@ printKeyStatus :: IO ()
 printKeyStatus = do
     response <- responseApiKey
     print $ getKeyPage response
-
-printScraperStatus :: Chan Int -> Chan AuctionGroup -> IO ()
-printScraperStatus cAp cAg = do
-    aps <- getChanContents cAp
-    writeList2Chan cAp aps
-    ags <- getChanContents cAg
-    writeList2Chan cAg ags
-    putStrLn
-        $  "The amount of auction pages in queue are "
-        ++ (show . length) aps
-        ++ "\nThe amount of auction groups in queue are "
-        ++ (show . length) ags
 
 
 test = do
@@ -293,16 +278,18 @@ apProducer c mv p = forever $ do
     if isNothing ap0
         then do
             print "Going to sleep for 30 seconds"
-            sleepS 30 -- If retry policy failed sleep for 30 seconds and try again
+            sleepS 30
         else do
             let pages = [0 .. (totalPages . fromJust $ ap0)]
+            print $ "APP" ++ show pages
             writeList2Chan c pages
             print "going to sleep for 60 seconds"
-            sleepS 90 -- If it succeeded wait for 60 seconds before getting the next batch of pages that need to be read (max calls per min is 120)
+            sleepS 1800 -- If it succeeded wait for 60 seconds before getting the next batch of pages that need to be read (max calls per min is 120)
 
 apConsumer :: Chan Int -> Chan AuctionGroup -> IO ()
 apConsumer consumeChan produceChan = forever $ do
     n        <- readChan consumeChan
+    putStrLn $ "APC: " ++ show n
     response <- responseAuctionPage n -- Find a way to handle the Exceptions possibly caused by https client
     let ap = getAuctionPage response
     if isNothing ap
@@ -319,6 +306,7 @@ agConsumer c mv p = forever $ do
         sAG _ = (runDb . storeAuctionGroup) ag
     -- Try 5 times to store the auction group with 50 ms in between tries
     retrying retryPolicyDefault (const $ return . failed) sAG
+    print "AGC : worked"
     dl <- takeMVar mv
     putMVar mv dl
     let inDb = txtInDL "itemGroup" dl . gItemName
