@@ -47,30 +47,31 @@ import           Control.Monad
 main :: IO ()
 main = do
     p <- connect $ host "127.0.0.1"
-    mv   <- newMVar []
-    c1   <- newChan
-    c2   <- newChan
-    forkIO $ apProducer c1 mv p
-    forkIO $ apConsumer c1 c2
-    forkIO $ replicateM_ 5 $ agConsumer c2 mv p
+    mvd   <- newMVar []
+    mvint   <- newMVar 0
+    takeMVar mvint
+    c  <- newChan
+    forkIO $ apProducer mvint mvd p
+    forkIO $ apConsumer mvint c
+    forkIO $ replicateM_ 5 $ agConsumer c mvd p
     print "Threads created.\n"
     -- make main wait forever and allow command line args to check on status
-    commandLine c1 c2
+    commandLine
 
-commandLine :: Chan Int -> Chan AuctionGroup -> IO ()
-commandLine cAp cAg = do
+commandLine :: IO ()
+commandLine = do
     req <- getLine
     case (T.toLower . T.pack) req of
         "key" -> do
             printKeyStatus
-            commandLine cAp cAg
+            commandLine
         "quit" -> putStrLn "quitting program, aborting all working threads"
-        _      -> commandLine cAp cAg
+        _      -> commandLine
 
 printKeyStatus :: IO ()
 printKeyStatus = do
     response <- responseApiKey
-    print $ getKeyPage response
+    print $ (fromJust . getKeyPage) response
 
 
 test = do
@@ -268,13 +269,13 @@ instance ToBSON Bid where
 -- Functions
 
 -- IO (Database and API requests)
-apProducer :: Chan Int -> MVar [Document]-> Pipe -> IO ()
-apProducer c mv p = forever $ do
+apProducer :: MVar Int -> MVar [Document]-> Pipe -> IO ()
+apProducer mvint mvd p = forever $ do
     print "Getting auction page 0"
-    dl <- takeMVar mv
+    dl <- takeMVar mvd
     let runDb = access p master "HypixelAH"
     allItems <- runDb getAllItems
-    putMVar mv allItems
+    putMVar mvd allItems
     response <- responseAuctionPage 0
     print "Got auction page 0"
     let ap0 = getAuctionPage response
@@ -283,16 +284,15 @@ apProducer c mv p = forever $ do
             print "Going to sleep for 30 seconds"
             sleepS 30
         else do
-            let pages = [0 .. ((+) (-1) . totalPages . fromJust $ ap0)]
-                seconds = 1800
-            writeList2Chan c pages
+            putMVar mvint ((totalPages . fromJust ) ap0)
+            let seconds = 1800
             print $ "going to sleep for " ++ show seconds ++ " seconds"
             sleepS seconds -- If it succeeded wait for 60 seconds before getting the next batch of pages that need to be read (max calls per min is 120)
 
-apConsumer :: Chan Int -> Chan AuctionGroup -> IO ()
-apConsumer consumeChan produceChan = forever $ do
-    n        <- getChanContents consumeChan
-    responses <- mapM responseAuctionPage n -- Find a way to handle the Exceptions possibly caused by https client
+apConsumer :: MVar Int -> Chan AuctionGroup -> IO ()
+apConsumer mvint produceChan = forever $ do
+    n        <- takeMVar mvint
+    responses <- mapM responseAuctionPage [0..(n-1)] -- Find a way to handle the Exceptions possibly caused by https client
     let aps = map (fromJust . getAuctionPage) responses -- throws error when a page fails
         as = concatMap auctions aps
         ags = (convertToAuctionGroup . getGroupedAuctions) as
@@ -310,6 +310,7 @@ agConsumer c mv p = forever $ do
     putMVar mv dl
     let inDb = txtInDL "itemGroup" dl . gItemName
     if inDb ag then return () else void $ (runDb . storeAuctionGroupMeta) ag
+
 
 -- Stores the item, category and tier of the AuctionGroup provided. Should only be called if the item group is not in the items collection yet
 storeAuctionGroupMeta :: AuctionGroup -> Action IO ()
